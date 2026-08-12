@@ -4,7 +4,27 @@ import pytest
 
 duckdb = pytest.importorskip("duckdb")
 
-from survey_search.index.build_duckdb import _to_date, _to_int, strip_version  # noqa: E402
+from survey_search.index.build_duckdb import (  # noqa: E402
+    _to_date,
+    _to_int,
+    strip_version,
+    submitted_month,
+)
+
+
+def test_submitted_month_from_arxiv_id():
+    """P0.6 — `date` 는 최신 버전 갱신일이라, 진짜 제출일은 id 에서 유도합니다."""
+    assert submitted_month("2401.12345v3") == "2024-01-01"
+    assert submitted_month("2401.12345") == "2024-01-01"
+    assert submitted_month("0705.1329v4") == "2007-05-01"    # 실제 사례: 2025년에 개정됨
+
+
+def test_submitted_month_returns_none_rather_than_guessing():
+    """구식 id 나 깨진 형식을 추측해 채우면 그 오류가 recency 가중에 조용히 섞입니다."""
+    assert submitted_month("cs/0501001v1") is None
+    assert submitted_month("2413.12345v1") is None           # 13월은 존재하지 않음
+    assert submitted_month("") is None
+    assert submitted_month("nonsense") is None
 
 
 def test_strip_version():
@@ -122,10 +142,12 @@ def test_schema_roundtrip_in_memory():
     con = duckdb.connect(":memory:")
     con.execute(SCHEMA)
     con.executemany(
-        "INSERT INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         [
-            ("a v1", "a", 1, "t", "abs", "2026-01-01", "cs.CL", "cs.CL", "x", "u", 9),
-            ("b v1", "b", 2, "t", "abs", "2020-01-01", "cs.LG", "cs.LG", "x", "u", 175503),
+            ("a v1", "a", 1, "t", "abs", "2026-01-01", "2026-01-01",
+             "cs.CL", "cs.CL", "x", "u", 9),
+            ("b v1", "b", 2, "t", "abs", "2020-01-01", "2020-01-01",
+             "cs.LG", "cs.LG", "x", "u", 175503),
         ],
     )
     top = con.execute("SELECT paper_id FROM papers ORDER BY citation_count DESC").fetchall()

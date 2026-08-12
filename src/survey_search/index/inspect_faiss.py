@@ -170,7 +170,7 @@ def probe_roundtrip(
     id_to_index: dict[str, int],
     by_arxiv: dict[str, dict],
     n_probe: int = 10,
-    device: str = "cuda",
+    device: str = "auto",
 ) -> list[dict]:
     """의미 수준 왕복 — 논문 → 임베딩 → 검색 → 같은 논문이 1위인가.
 
@@ -186,7 +186,17 @@ def probe_roundtrip(
     probes = keys[::step][:n_probe]
 
     model = SentenceTransformer(GTE_MODEL, trust_remote_code=True)
-    model.to(torch.device(device))
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    try:
+        model.to(torch.device(device))
+    except RuntimeError as e:
+        # 이 머신은 GPU 를 공유합니다 — 8장이 전부 차 있는 시점이 실제로 관측됩니다.
+        # 검증이 GPU 점유 상황 때문에 실패하면 안 되므로 CPU 로 물러섭니다.
+        if device == "cpu":
+            raise
+        log.warning("%s 로 올리지 못해 CPU 로 폴백합니다: %s", device, e)
+        model.to(torch.device("cpu"))
     texts = [f"{by_arxiv[p]['title']}\n{by_arxiv[p].get('abs', '')}" for p in probes]
     qv = np.asarray(model.encode(texts), dtype="float32")
 

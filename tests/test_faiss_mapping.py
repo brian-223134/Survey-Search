@@ -90,7 +90,7 @@ def test_semantic_roundtrip(index, id_to_index):
     from survey_search.index.inspect_faiss import load_tinydb, probe_roundtrip
 
     by_arxiv = load_tinydb(SURVEYFORGE.tinydb)
-    detail = probe_roundtrip(index, id_to_index, by_arxiv, n_probe=10)
+    detail = probe_roundtrip(index, id_to_index, by_arxiv, n_probe=10, device="auto")
 
     failed = [d for d in detail if not d["ok"]]
     assert not failed, f"왕복 실패 {len(failed)}/{len(detail)}: {failed}"

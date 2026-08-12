@@ -21,19 +21,31 @@ class Paper:
     base_id: str                        # "2401.12345" — 교차 코퍼스 정합 키
     title: str
     abstract: str
-    date: str                           # ISO 8601 (YYYY-MM-DD)
+    date: str                           # ISO 8601. **최신 버전 갱신일**입니다 (P0.6 실측)
+    #: id 의 YYMM 에서 유도한 최초 제출월. 나이 계산의 기준은 이쪽이 맞습니다.
+    #: 구식 id(`cs/0501001`)는 빈 문자열 — 그때는 `date` 로 물러섭니다.
+    submitted_date: str = ""
     categories: tuple[str, ...] = ()
     citation_count: int | None = None   # 백엔드가 모르면 None (AutoSurvey 백엔드)
     score: float = 0.0                  # 최종 랭킹 점수
     facets: tuple[str, ...] = ()        # 이 논문을 끌어올린 facet들
     provenance: tuple[str, ...] = ()    # {"dense", "bm25", "snowball"}
 
+    def age_date(self) -> str:
+        """나이 계산에 쓸 날짜. **제출일이 있으면 그쪽이 우선입니다.**
+
+        `date` 는 최신 버전 갱신일이라, 2007년 논문이 2025년에 개정되면 '최신'으로
+        보입니다. 실측상 `date` 기준 "최근 12개월" 논문의 2.9%가 그런 경우입니다.
+        """
+        return self.submitted_date or self.date
+
     def months_since(self, ref: _date | None = None) -> float | None:
-        """게시 후 경과 개월. `date` 가 없거나 깨졌으면 None."""
-        if not self.date:
+        """제출 후 경과 개월. 기준 날짜가 없거나 깨졌으면 None."""
+        raw = self.age_date()
+        if not raw:
             return None
         try:
-            d = datetime.strptime(self.date[:10], "%Y-%m-%d").date()
+            d = datetime.strptime(raw[:10], "%Y-%m-%d").date()
         except ValueError:
             return None
         ref = ref or _date.today()

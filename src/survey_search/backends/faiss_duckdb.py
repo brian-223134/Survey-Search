@@ -43,7 +43,7 @@ class FaissDuckDBBackend:
         faiss_title: Path = SURVEYFORGE.faiss_title,
         id_map_path: Path = SURVEYFORGE.id_map,
         model_name: str = GTE_MODEL,
-        device: str = "cuda",
+        device: str = "auto",
         embed_batch_size: int = 32,
     ) -> None:
         self.name = name
@@ -56,6 +56,7 @@ class FaissDuckDBBackend:
 
         self._con = None
         self._model = None
+        self._active_device: str | None = None   # 실제로 올라간 곳 (cuda/cpu)
         self._indexes: dict[str, object] = {}
         self._index_to_id: dict[int, str] | None = None
         self._id_to_index: dict[str, int] | None = None
@@ -80,14 +81,34 @@ class FaissDuckDBBackend:
 
     @property
     def model(self):
+        """쿼리 임베딩 모델. **GPU 가 막혀 있으면 CPU 로 물러섭니다.**
+
+        이 머신은 GPU 를 여러 사람이 공유합니다 — 8장이 전부 40GB 넘게 차 있는 시점이
+        실제로 관측됩니다. 쿼리 임베딩은 한 번에 수십 건이라 CPU 로도 돌아가므로,
+        여기서 죽는 것보다 느리게라도 도는 편이 낫습니다. **어디로 갔는지는 로그에 남깁니다.**
+        """
         if self._model is None:
             import torch
             from sentence_transformers import SentenceTransformer
 
             t = time.perf_counter()
             m = SentenceTransformer(self._model_name, trust_remote_code=True)
-            m.to(torch.device(self._device))
-            log.info("embedding model loaded in %.1fs (%s)", time.perf_counter() - t, self._device)
+
+            want = self._device
+            if want == "auto":
+                want = "cuda" if torch.cuda.is_available() else "cpu"
+            try:
+                m.to(torch.device(want))
+                self._active_device = want
+            except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+                if want == "cpu":
+                    raise
+                log.warning("%s 로 올리지 못해 CPU 로 폴백합니다: %s", want, e)
+                m.to(torch.device("cpu"))
+                self._active_device = "cpu"
+
+            log.info("embedding model loaded in %.1fs (%s)",
+                     time.perf_counter() - t, self._active_device)
             self._model = m
         return self._model
 
@@ -172,7 +193,7 @@ class FaissDuckDBBackend:
             rows = self.con.execute(
                 """
                 SELECT p.paper_id, p.base_id, p.title, p.abstract, CAST(p.date AS VARCHAR),
-                       p.categories, p.citation_count
+                       CAST(p.submitted_date AS VARCHAR), p.categories, p.citation_count
                 FROM papers p JOIN wanted w USING (paper_id)
                 """
             ).fetchall()
@@ -186,8 +207,9 @@ class FaissDuckDBBackend:
                 title=r[2] or "",
                 abstract=r[3] or "",
                 date=r[4] or "",
-                categories=tuple((r[5] or "").split()),
-                citation_count=int(r[6]) if r[6] is not None else None,
+                submitted_date=r[5] or "",
+                categories=tuple((r[6] or "").split()),
+                citation_count=int(r[7]) if r[7] is not None else None,
             )
             for r in rows
         }

@@ -94,8 +94,8 @@ needs_assets = pytest.mark.skipif(
 
 @needs_assets
 @pytest.mark.assets
-def test_autosurvey_adapter_returns_ids_and_matching_info():
-    db = SurveySearchDatabase()
+def test_autosurvey_adapter_returns_ids_and_matching_info(backend):
+    db = SurveySearchDatabase(backend=backend)
     ids = db.get_ids_from_query("retrieval augmented generation", 50)
     assert len(ids) == 50
     assert all(isinstance(i, str) for i in ids)
@@ -110,8 +110,8 @@ def test_autosurvey_adapter_returns_ids_and_matching_info():
 
 @needs_assets
 @pytest.mark.assets
-def test_surveyforge_adapter_respects_filter():
-    rag = SurveySearchRAG()
+def test_surveyforge_adapter_respects_filter(backend):
+    rag = SurveySearchRAG(backend=backend)
     wide = rag.retrieve_id("retrieval augmented generation", top_k=200, max_out=200)
     assert wide
 
@@ -124,9 +124,9 @@ def test_surveyforge_adapter_respects_filter():
 
 @needs_assets
 @pytest.mark.assets
-def test_surveyforge_citation_rerank_is_flagged_as_substituted():
+def test_surveyforge_citation_rerank_is_flagged_as_substituted(backend):
     """인용수 정렬을 freshness 로 바꿨다는 사실이 stats 에 남아야 합니다."""
-    rag = SurveySearchRAG()
+    rag = SurveySearchRAG(backend=backend)
     rag.retrieve_id("retrieval augmented generation", top_k=100, max_out=100,
                     rerank="citation")
     warnings = " ".join(rag.last_stats.warnings)

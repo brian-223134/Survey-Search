@@ -36,6 +36,8 @@ from survey_search.assets import PAPERS_DUCKDB, SURVEYFORGE
 log = logging.getLogger(__name__)
 
 _VERSION_SUFFIX = re.compile(r"v\d+$")
+#: arXiv id 의 YYMM 부분 — **최초 제출 연월**을 인코딩합니다 (2007-04 이후 형식)
+_ARXIV_YYMM = re.compile(r"^(\d{2})(\d{2})\.\d{4,5}(?:v\d+)?$")
 
 SCHEMA = """
 CREATE TABLE papers (
@@ -44,7 +46,8 @@ CREATE TABLE papers (
     faiss_id        BIGINT NOT NULL,       -- 1-based. FAISS search() 가 돌려주는 값
     title           VARCHAR,
     abstract        VARCHAR,
-    date            DATE,
+    date            DATE,                  -- 원본 필드. **최신 버전 갱신일**입니다 (P0.6 실측)
+    submitted_date  DATE,                  -- id 의 YYMM 에서 유도한 최초 제출 연월 (그 달 1일)
     categories      VARCHAR,               -- 원본이 공백 구분 문자열 ("cs.IT cs.LG")
     primary_category VARCHAR,
     authors         VARCHAR,
@@ -52,6 +55,27 @@ CREATE TABLE papers (
     citation_count  BIGINT                 -- 원본은 문자열. 여기서 정수로 고정
 )
 """
+
+
+def submitted_month(paper_id: str) -> str | None:
+    """arXiv id → 최초 제출 연월의 1일 (`"2401.12345v3"` → `"2024-01-01"`).
+
+    **왜 필요한가 (P0.6 실측):** 원본 `date` 는 v1 게시일이 아니라 **최신 버전 갱신일**입니다.
+    v1 논문은 96.0% 가 제출월과 같은 달인데 v2+ 는 70% 로 떨어지고 평균 +1.3~2.8개월
+    밀립니다. 그 결과 `date` 기준 "최근 12개월" 논문의 **2.9%** 는 실제로 18개월 이전에
+    제출된 논문입니다 (2007년 논문이 2025년에 개정된 사례도 있습니다).
+
+    2007-04 이전의 구식 id(`cs/0501001`)와 형식이 깨진 id 는 None 을 돌려줍니다 —
+    추측해서 채우면 그 오류가 recency 가중에 조용히 섞입니다.
+    """
+    m = _ARXIV_YYMM.match(paper_id)
+    if not m:
+        return None
+    yy, mm = int(m.group(1)), int(m.group(2))
+    if not 1 <= mm <= 12:
+        return None
+    # arXiv 신형 id 는 2007-04 시작. 90~99 는 나올 수 없으므로 전부 2000년대입니다.
+    return f"{2000 + yy:04d}-{mm:02d}-01"
 
 
 def strip_version(paper_id: str) -> str:
@@ -70,6 +94,7 @@ class BuildStats:
     dropped_duplicate_id: int = 0    # paper_id 중복
     citation_unparseable: int = 0    # 숫자로 못 읽어 0 처리한 건
     date_unparseable: int = 0
+    no_submitted_date: int = 0       # id 에서 제출월을 못 뽑은 건 (구식 id 등)
     authors_coerced: int = 0         # authors 는 원래 리스트 — 전건 해당이 정상
     text_coerced_unexpected: int = 0  # title/abs/url/cat 이 문자열이 아니었던 건 (0이어야 정상)
     parse_s: float = 0.0
@@ -167,6 +192,10 @@ def build(
         if not (t_ok and a_ok and u_ok and c_ok):
             stats.text_coerced_unexpected += 1
 
+        sub_date = submitted_month(paper_id)
+        if sub_date is None:
+            stats.no_submitted_date += 1
+
         cats = (cat_raw or "").strip()
         rows.append((
             paper_id,
@@ -175,6 +204,7 @@ def build(
             title,
             abstract,
             date,
+            sub_date,
             cats,
             cats.split()[0] if cats else None,
             authors,
@@ -198,7 +228,7 @@ def build(
     # Arrow 테이블로 넘기면 DuckDB 가 컬럼 단위로 받아 수십 초에 끝납니다.
     import pyarrow as pa
 
-    cols = list(zip(*rows)) if rows else [()] * 11
+    cols = list(zip(*rows)) if rows else [()] * 12
     arrow = pa.table(
         {
             "paper_id": pa.array(cols[0], pa.string()),
@@ -207,11 +237,12 @@ def build(
             "title": pa.array(cols[3], pa.string()),
             "abstract": pa.array(cols[4], pa.string()),
             "date": pa.array(cols[5], pa.string()).cast(pa.date32()),
-            "categories": pa.array(cols[6], pa.string()),
-            "primary_category": pa.array(cols[7], pa.string()),
-            "authors": pa.array(cols[8], pa.string()),
-            "url": pa.array(cols[9], pa.string()),
-            "citation_count": pa.array(cols[10], pa.int64()),
+            "submitted_date": pa.array(cols[6], pa.string()).cast(pa.date32()),
+            "categories": pa.array(cols[7], pa.string()),
+            "primary_category": pa.array(cols[8], pa.string()),
+            "authors": pa.array(cols[9], pa.string()),
+            "url": pa.array(cols[10], pa.string()),
+            "citation_count": pa.array(cols[11], pa.int64()),
         }
     )
     con.register("incoming", arrow)

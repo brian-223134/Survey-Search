@@ -169,7 +169,8 @@ def rerank(
     out = [
         Paper(
             paper_id=p.paper_id, base_id=p.base_id, title=p.title, abstract=p.abstract,
-            date=p.date, categories=p.categories, citation_count=p.citation_count,
+            date=p.date, submitted_date=p.submitted_date,
+            categories=p.categories, citation_count=p.citation_count,
             score=s, facets=p.facets, provenance=p.provenance,
         )
         for p, s in scored

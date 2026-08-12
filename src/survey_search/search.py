@@ -182,6 +182,7 @@ def search_topic(
             title=p.title,
             abstract=p.abstract,
             date=p.date,
+            submitted_date=p.submitted_date,
             categories=p.categories,
             citation_count=p.citation_count,
             score=score_of.get(p.paper_id, 0.0),
