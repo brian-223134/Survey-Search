@@ -181,6 +181,9 @@ class SearchConfig:
     #: S8 — 인용 스노우볼링. **백엔드가 references/cited_by 를 알아야 합니다**
     #: (OnlineBackend / HybridBackend). 모르면 no-op 이 되고 stats 에 남습니다.
     snowball: bool = False
+    #: S8b — cross-encoder 재랭킹. 천장 측정에서 랭킹 손실 18.6%p 가 확인된 구간을
+    #: 노립니다. GPU 권장(CPU 는 분 단위). 모델 2.2GB.
+    rerank: bool = False
 
     #: 단계별 후보 폭. 최종 n_papers 보다 넉넉해야 dedup 후에도 남습니다
     dense_top_k: int = 2000
@@ -195,6 +198,11 @@ class SearchConfig:
     facet_config: object | None = None
     #: S8 설정 (SnowballConfig). None 이면 기본값
     snowball_config: object | None = None
+    #: S8b 설정 (RerankConfig). None 이면 기본값
+    rerank_config: object | None = None
+    #: 재랭커 인스턴스. **재사용하세요** — 2.2GB 모델을 검색마다 다시 읽으면 안 됩니다.
+    #: None 이면 search_topic 이 매번 새로 만듭니다(배치 실행에서는 치명적).
+    reranker: object | None = None
 
     #: S5 제목 병합 / S6·S7 랭킹이 실제로 보는 후보 수. None 이면 후보 전체.
     #: facet 을 켜면 후보가 수만 편이 되는데, 여기를 작게 잡으면 S6·S7 이 RRF 상위

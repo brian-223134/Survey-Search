@@ -266,6 +266,41 @@ def search_topic(
         stats.add(StageStat("S8 snowball", len(candidates), len(candidates),
                             skipped=True, note="disabled"))
 
+    # --- S8b cross-encoder 재랭킹 ---------------------------------------------
+    # 다양성(S7) 앞에 둡니다: MMR 은 관련성 순서를 입력으로 받아 다양성과 저울질하므로,
+    # 더 정확한 순서를 먼저 만들어 주는 편이 맞습니다.
+    if cfg.rerank:
+        from survey_search.core.rerank import CrossEncoderReranker
+
+        t = time.perf_counter()
+        reranker = cfg.reranker or CrossEncoderReranker(cfg.rerank_config)
+        if cfg.reranker is None:
+            stats.warn("재랭커를 매 검색마다 새로 만들고 있습니다 — 배치 실행에서는 "
+                       "SearchConfig(reranker=...) 로 인스턴스를 재사용하세요")
+        # **top_n <= n_papers 면 재랭킹이 최종 목록을 못 바꿉니다.** 상위 top_n 안에서만
+        # 순서가 바뀌는데 컷이 그보다 아래에 있으면, 재랭킹 전후의 최종 집합이 같습니다
+        # (순서만 다름). 끄고 켠 실험이 recall 로는 구분되지 않게 됩니다.
+        eff_top_n = getattr(reranker.config, "top_n", 0)
+        if eff_top_n <= cfg.n_papers:
+            stats.warn(
+                f"재랭킹 범위(top_n={eff_top_n:,})가 최종 편수(n_papers={cfg.n_papers:,})보다 "
+                f"작거나 같습니다 — 최종 '집합'은 그대로이고 순서만 바뀝니다. "
+                f"recall 을 올리려면 top_n 을 n_papers 보다 크게 잡으세요"
+            )
+
+        candidates, rstats = reranker.rerank(topic, candidates)
+        stats.add(StageStat("S8b rerank", len(candidates), len(candidates),
+                            skipped=not rstats.applied, elapsed_s=_elapsed(t),
+                            note=f"{rstats.note} device={rstats.device}"))
+        for e in rstats.errors:
+            stats.warn(f"재랭킹 실패(원래 순서 유지): {e}")
+        if rstats.applied and rstats.n_untouched:
+            stats.warn(f"재랭킹은 상위 {rstats.n_scored:,}편에만 적용 — "
+                       f"{rstats.n_untouched:,}편은 원래 순서 유지")
+    else:
+        stats.add(StageStat("S8b rerank", len(candidates), len(candidates),
+                            skipped=True, note="disabled"))
+
     # --- S7 diversity -------------------------------------------------------
     if cfg.diversity:
         from survey_search.core.diversity import diversify
