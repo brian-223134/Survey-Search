@@ -5,6 +5,7 @@
 SETTING.md
 TASKS.md
 DESIGN.md
+HANDOFF.md
 __pycache__/
 *.egg-info/
 *.pyc
