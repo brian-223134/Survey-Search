@@ -89,6 +89,12 @@ class SearchStats:
     n_lexical_hits: int = 0
     n_final: int = 0
 
+    # 경로별 기여 — "BM25 가 dense 가 못 잡은 걸 데려왔나"에 답하는 숫자.
+    # 이 프로젝트의 주장이 성립하려면 n_bm25_only 가 의미 있게 커야 합니다.
+    n_dense_only: int = 0
+    n_bm25_only: int = 0
+    n_both: int = 0
+
     recent_6m_ratio: float = 0.0
     recent_12m_ratio: float = 0.0
     recent_24m_ratio: float = 0.0
@@ -120,6 +126,8 @@ class SearchStats:
             *(f"  {s}" for s in self.stages),
             "",
             f"final   : {self.n_final:,} papers in {self.total_s:.1f}s",
+            f"source  : dense_only={self.n_dense_only:,}  bm25_only={self.n_bm25_only:,}  "
+            f"both={self.n_both:,}",
             f"recency : 6m={self.recent_6m_ratio:.1%}  12m={self.recent_12m_ratio:.1%}  "
             f"24m={self.recent_24m_ratio:.1%}",
             f"dates   : {self.date_min} .. {self.date_max}"
@@ -164,6 +172,9 @@ class SearchConfig:
     lexical_top_k: int = 2000
 
     rrf_k: int = 60             # DESIGN §S4
+
+    #: S6 설정. None 이면 기본값(alpha=beta=0.5, WEIGHT 모드)
+    freshness_config: object | None = None
 
     date_min: str | None = None
     date_max: str | None = None

@@ -49,15 +49,37 @@ facet 없이, 단일 쿼리로 dense+BM25+RRF+dedup까지. **여기까지가 "�
 
 | # | 작업 | 산출물 | 검증 |
 |---|---|---|---|
-| 1.1 | `types.py` — Paper / Facet / SearchResult / SearchStats | 자료형 | — |
-| 1.2 | `backends/base.py` — Backend 프로토콜 | 인터페이스 | mock 백엔드로 테스트 통과 |
-| 1.3 | `backends/faiss_duckdb.py` — dense + lexical + meta | 동작하는 백엔드 | 토픽 1개로 top-100 반환 |
-| 1.4 | `core/fuse.py` — RRF | 융합 함수 | 합성 순위로 단위 테스트 |
-| 1.5 | `core/dedup.py` — 버전 병합 + 제목 정규화 | 중복 제거 | 알려진 중복 쌍이 병합됨 |
-| 1.6 | `search.py` — 오케스트레이터 (facet 없이) | `search_topic()` | RAG 토픽으로 1500편, stats 출력 |
+| 1.1 | `types.py` — Paper / Facet / SearchResult / SearchStats | 자료형 | ✅ |
+| 1.2 | `backends/base.py` — Backend 프로토콜 | 인터페이스 | ✅ |
+| 1.3 | `backends/faiss_duckdb.py` — dense + lexical + meta | 동작하는 백엔드 | ✅ 1500편 반환 |
+| 1.4 | `core/fuse.py` — RRF | 융합 함수 | ✅ 단위 테스트 6개 |
+| 1.5 | `core/dedup.py` — 버전 병합 + 제목 정규화 | 중복 제거 | ✅ 단위 테스트 6개 |
+| 1.6 | `search.py` — 오케스트레이터 (facet 없이) | `search_topic()` | ✅ 아래 표 참조 |
 
 **P1 검증 기준**: `search_topic("Retrieval-Augmented Generation for Large Language Models")`가
-1500편을 반환하고, `stats`에 단계별 건수와 최근 12개월 비율이 찍힐 것.
+1500편을 반환하고, `stats`에 단계별 건수와 최근 12개월 비율이 찍힐 것. → ✅ **통과**
+
+### P1 실측 결과 (2026-08-12, 토픽 = RAG for LLMs, n_papers=1500)
+
+| | dense only (베이스라인) | dense + BM25 |
+|---|---|---|
+| 최근 6개월 비율 | 16.9% | 16.9% |
+| 최근 12개월 비율 | 35.5% | **36.6%** |
+| 최근 24개월 비율 | 69.7% | **71.7%** |
+| dense만 | 1,500 | 199 |
+| **BM25만 (dense가 못 찾음)** | — | **234** |
+| 양쪽 | 0 | 1,067 |
+| 최종 목록 교체 | — | **351편 (23.4%)** |
+| 소요 (warm) | 1.4 s | 1.5 s |
+
+**읽는 법 두 가지:**
+
+1. **BM25는 값을 냅니다** — dense가 전혀 못 찾은 논문 234편을 데려왔고, 최종 1500편의
+   23.4%가 교체됐습니다. SurveyForge가 `NotImplementedError`로 비워 둔 자리가 놀고 있던 게
+   맞습니다.
+2. **하지만 최신성 문제는 BM25로 안 풀립니다** — 12개월 비율이 35.5% → 36.6%로 1.1%p
+   움직였을 뿐입니다. **최신성은 검색 단계가 아니라 랭킹 단계(S6)의 문제**라는 뜻이고,
+   이 프로젝트의 가설이 맞는 방향을 가리킵니다. P2.3이 진짜 시험대입니다.
 
 ## P2 — facet + freshness + 다양성
 
@@ -65,14 +87,40 @@ facet 없이, 단일 쿼리로 dense+BM25+RRF+dedup까지. **여기까지가 "�
 
 | # | 작업 | 산출물 | 검증 |
 |---|---|---|---|
-| 2.1 | `core/facets.py` — LLM facet 분해 + 디스크 캐시 | facet 8~16개 | 같은 토픽 재실행 시 LLM 호출 0회 |
-| 2.2 | facet fan-out 배선 (S2·S3 배치화) | 멀티쿼리 검색 | 단일 쿼리 대비 신규 논문 유입 수 |
-| 2.3 | `core/rank.py` — 연령 정규화 인용률 + recency | freshness 랭킹 | 최근 12개월 비율이 P1 대비 상승 |
-| 2.4 | `core/diversity.py` — MMR + facet 쿼터 | 다양성 제어 | facet별 최소 배정 충족 |
-| 2.5 | `SearchConfig` ablation 스위치 배선 | 단계 on/off | 전부 off = 베이스라인 재현 |
+| 2.1 | `core/facets.py` — LLM facet 분해 + 디스크 캐시 | facet 8~16개 | 같은 토픽 재실행 시 LLM 호출 0회 | ⬜ |
+| 2.2 | facet fan-out 배선 (S2·S3 배치화) | 멀티쿼리 검색 | 단일 쿼리 대비 신규 논문 유입 수 | ⬜ |
+| 2.3 | `core/rank.py` — 연령 정규화 인용률 + recency | freshness 랭킹 | 최근 12개월 비율이 P1 대비 상승 | ✅ **완료** |
+| 2.4 | `core/diversity.py` — MMR + facet 쿼터 | 다양성 제어 | facet별 최소 배정 충족 | ⬜ |
+| 2.5 | `SearchConfig` ablation 스위치 배선 | 단계 on/off | 전부 off = 베이스라인 재현 | 🟡 S6까지 배선됨 |
 
 **P2 검증 기준**: 같은 토픽에서 `facets=False` 대비 `facets=True`의 신규 논문 유입 수와
 최근 12개월 비율 변화를 표로 낼 것. **이 표가 이 프로젝트의 첫 결과물입니다.**
+
+### P2.3 실측 결과 (2026-08-12, 토픽 = RAG for LLMs, n_papers=1500)
+
+| 설정 | 최근 6m | 최근 12m | 최근 24m | 인용수 중앙값 | 베이스라인 대비 신규 |
+|---|---|---|---|---|---|
+| ① dense only (베이스라인) | 16.9% | 35.5% | 69.7% | 4 | — |
+| ② + BM25 | 16.9% | 36.6% | 71.7% | 3 | 351 |
+| ③ + freshness (weight) | **18.5%** | **38.5%** | **73.1%** | **4** | 353 |
+| ④ + freshness (quota 0.30) | 17.0% | 36.3% | 71.2% | 4 | 352 |
+| ⑤ + freshness (quota 0.50) | **23.7%** | **50.0%** | **77.5%** | 3 | 382 |
+
+**읽는 법 세 가지:**
+
+1. **weight 모드는 공짜로 최신성을 올립니다** — 12개월 비율 36.6% → 38.5%(+1.9%p)인데
+   인용수 중앙값은 3 → 4로 오히려 올랐습니다. 최신 논문을 밀어주면 품질이 떨어질 것이라는
+   우려가 이 데이터에서는 나타나지 않습니다.
+2. **quota 0.30이 무효과인 것은 정상입니다** — 후보 풀에 이미 최근 12개월 논문이 30% 넘게
+   있어서 하한이 이미 충족돼 있습니다. 쿼터는 하한이지 상한이 아닙니다.
+   `quota_promoted=0`은 고장이 아니라 "필요 없었다"는 뜻입니다.
+3. **quota 0.50은 정확히 50.0%를 맞춥니다** — 다만 인용수 중앙값이 4 → 3으로 내려갑니다.
+   즉 **weight는 부드럽게 밀어주고, quota는 정확히 보장하되 대가가 있습니다.** 둘 다 남겨
+   두고 골라 쓰는 게 맞습니다.
+
+> ⚠ **아직 답하지 못한 것**: 새로 올라온 논문이 *좋은* 논문인지는 이 숫자로 알 수 없습니다.
+> 최신성 비율은 "얼마나 최신인가"만 재지 "얼마나 맞는가"를 재지 않습니다. 정답 집합
+> (SurGE 또는 대체)이 붙기 전까지 이 표는 **방향 지표이지 성능 지표가 아닙니다.**
 
 ## P3 — 어댑터 · CLI
 
@@ -116,17 +164,30 @@ facet 없이, 단일 쿼리로 dense+BM25+RRF+dedup까지. **여기까지가 "�
 
 ## 지금 당장의 다음 한 걸음
 
-**P0.1 (스캐폴딩) → P0.4/0.5 (DuckDB + FTS)**. P0.2·0.3은 실측으로 끝났고
-그 결과가 P1 백엔드 설계를 이미 확정해 줬습니다 — 남은 P0는 BM25 쪽 자산 준비뿐입니다.
+**P2.3 (freshness 랭킹)**. P1 실측에서 BM25가 최신성을 1.1%p밖에 못 올렸으므로,
+이 프로젝트의 가설은 S6에서 판가름납니다. facet(P2.1)보다 먼저 하는 것을 권합니다 —
+LLM 호출이 없어 결정적이고, 효과를 단독으로 잴 수 있기 때문입니다.
+
+### 환경 재현
 
 ```bash
 cd /data2/chanjoong/survey-agent/survey-search
-python3 -m venv .venv && .venv/bin/pip install -e .   # faiss-cpu, duckdb, sentence-transformers
-.venv/bin/python -m survey_search.index.build_duckdb \
-    --db ../SurveyForge_data/database_2026-08/arxiv_paper_db_with_cc.json \
-    --id-map ../SurveyForge_data/database_2026-08/arxivid_to_index_abs.json \
-    --out data/papers.duckdb
+virtualenv -p python3.10 .venv                     # python3 -m venv 는 ensurepip 없어서 실패
+.venv/bin/pip install -e .
+.venv/bin/pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+.venv/bin/python -m survey_search.index.build_duckdb    # 90초, 1.1GB
+.venv/bin/python -m pytest tests/ -q                    # 32 passed
 ```
 
-P0.2의 왕복 검증은 `index/inspect_faiss.py`로 정식화해 회귀 테스트에 넣습니다
-(측정 자체는 끝났으므로 재실행이 아니라 **고정**이 목적입니다).
+### 검색 돌려보기
+
+```python
+from survey_search.backends.faiss_duckdb import FaissDuckDBBackend
+from survey_search.search import search_topic
+from survey_search.types import SearchConfig
+
+be = FaissDuckDBBackend()          # 첫 검색은 cold 로 12초, 이후 0.1초
+r = search_topic("Retrieval-Augmented Generation for Large Language Models",
+                 backend=be, config=SearchConfig(n_papers=1500))
+print(r.stats.report())
+```
