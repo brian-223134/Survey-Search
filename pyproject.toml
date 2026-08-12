@@ -26,4 +26,5 @@ where = ["src"]
 testpaths = ["tests"]
 markers = [
     "assets: 실제 FAISS/DuckDB 자산이 있어야 도는 테스트 (없으면 skip)",
+    "network: 실제 arXiv/S2 API 를 부르는 테스트 (기본 제외)",
 ]

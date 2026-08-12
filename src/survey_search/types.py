@@ -174,10 +174,13 @@ class SearchConfig:
 
     n_papers: int = 1500
 
-    facets: bool = False        # S1 — P2에서 켭니다
+    facets: bool = False        # S1 — LLM facet 분해 (OpenRouter 호출 1회, 캐시됨)
     lexical: bool = True        # S3 — BM25
-    freshness: bool = False     # S6 — P2
-    diversity: bool = False     # S7 — P2
+    freshness: bool = False     # S6 — 연령 정규화 인용률 + recency
+    diversity: bool = False     # S7 — MMR + facet 쿼터
+    #: S8 — 인용 스노우볼링. **백엔드가 references/cited_by 를 알아야 합니다**
+    #: (OnlineBackend / HybridBackend). 모르면 no-op 이 되고 stats 에 남습니다.
+    snowball: bool = False
 
     #: 단계별 후보 폭. 최종 n_papers 보다 넉넉해야 dedup 후에도 남습니다
     dense_top_k: int = 2000
@@ -190,6 +193,8 @@ class SearchConfig:
 
     #: S1 설정 (FacetConfig). None 이면 기본값 + 환경변수
     facet_config: object | None = None
+    #: S8 설정 (SnowballConfig). None 이면 기본값
+    snowball_config: object | None = None
 
     #: S5 제목 병합 / S6·S7 랭킹이 실제로 보는 후보 수. None 이면 후보 전체.
     #: facet 을 켜면 후보가 수만 편이 되는데, 여기를 작게 잡으면 S6·S7 이 RRF 상위

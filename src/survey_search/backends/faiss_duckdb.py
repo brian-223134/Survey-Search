@@ -187,33 +187,48 @@ class FaissDuckDBBackend:
         # facet 을 켜면 후보가 수만 편이 되므로 이 차이가 파이프라인 전체를 좌우합니다.
         import pyarrow as pa
 
-        ids_tbl = pa.table({"paper_id": pa.array(paper_ids, pa.string())})
+        # **버전 없는 id 도 받아야 합니다.** S2/arXiv 같은 외부 소스는 `2401.12345`
+        # 형태로 주는데 우리 DB 의 키는 `2401.12345v2` 입니다. base_id 로도 맞춰 보지
+        # 않으면 스노우볼링이 통째로 0편을 내면서도 조용히 지나갑니다 (실제로 겪었습니다).
+        from survey_search.core.dedup import strip_version
+
+        ids_tbl = pa.table({
+            "want": pa.array(paper_ids, pa.string()),
+            "want_base": pa.array([strip_version(p) for p in paper_ids], pa.string()),
+        })
         self.con.register("wanted", ids_tbl)
         try:
             rows = self.con.execute(
                 """
-                SELECT p.paper_id, p.base_id, p.title, p.abstract, CAST(p.date AS VARCHAR),
-                       CAST(p.submitted_date AS VARCHAR), p.categories, p.citation_count
-                FROM papers p JOIN wanted w USING (paper_id)
+                SELECT w.want, p.paper_id, p.base_id, p.title, p.abstract,
+                       CAST(p.date AS VARCHAR), CAST(p.submitted_date AS VARCHAR),
+                       p.categories, p.citation_count
+                FROM wanted w JOIN papers p
+                  ON p.paper_id = w.want OR p.base_id = w.want_base
                 """
             ).fetchall()
         finally:
             self.con.unregister("wanted")
 
-        by_id = {
-            r[0]: Paper(
-                paper_id=r[0],
-                base_id=r[1],
-                title=r[2] or "",
-                abstract=r[3] or "",
-                date=r[4] or "",
-                submitted_date=r[5] or "",
-                categories=tuple((r[6] or "").split()),
-                citation_count=int(r[7]) if r[7] is not None else None,
+        # r[0] 은 호출부가 물어본 id, r[1] 은 DB 의 native id 입니다.
+        # base_id 로 매칭되면 한 want 에 여러 버전이 걸릴 수 있으므로 최신 버전을 남깁니다.
+        by_want: dict[str, Paper] = {}
+        for r in rows:
+            want, native = r[0], r[1]
+            prev = by_want.get(want)
+            if prev is not None and prev.paper_id >= native:
+                continue
+            by_want[want] = Paper(
+                paper_id=native,
+                base_id=r[2],
+                title=r[3] or "",
+                abstract=r[4] or "",
+                date=r[5] or "",
+                submitted_date=r[6] or "",
+                categories=tuple((r[7] or "").split()),
+                citation_count=int(r[8]) if r[8] is not None else None,
             )
-            for r in rows
-        }
-        return [by_id[pid] for pid in paper_ids if pid in by_id]
+        return [by_want[pid] for pid in paper_ids if pid in by_want]
 
     def filter_ids(
         self,

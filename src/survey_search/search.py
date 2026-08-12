@@ -144,7 +144,7 @@ def search_topic(
         elapsed_s=_elapsed(t),
         note=f"제목 병합은 상위 {title_window:,}편에만 적용",
     ))
-    if n_meta_missing:
+    if n_meta_missing > 0:
         stats.warn(f"메타데이터를 못 찾은 id {n_meta_missing:,}건 — 인덱스와 DuckDB 불일치 가능")
     if len(fused) > title_window:
         stats.warn(
@@ -159,8 +159,13 @@ def search_topic(
     window = deduped[:rank_window]
     score_of = dict(window)
     fetched = backend.get_papers([pid for pid, _ in window])
-    if len(fetched) != len(window):
-        stats.warn(f"후보 {len(window):,}편 중 {len(window) - len(fetched):,}편의 메타데이터 없음")
+    # 하이브리드 백엔드는 로컬에 없는 논문을 온라인에서 채우므로 **요청보다 많이**
+    # 돌아올 수 있습니다. 그 경우는 결손이 아니라 보강입니다 — 구분해서 남깁니다.
+    delta = len(fetched) - len(window)
+    if delta < 0:
+        stats.warn(f"후보 {len(window):,}편 중 {-delta:,}편의 메타데이터 없음")
+    elif delta > 0:
+        stats.warn(f"로컬에 없는 논문 {delta:,}편을 온라인에서 보강했습니다")
     if len(deduped) > rank_window:
         stats.warn(f"{len(deduped) - rank_window:,}편은 랭킹 대상에서 제외됨 (윈도우 {rank_window:,})")
 
@@ -213,6 +218,53 @@ def search_topic(
     else:
         stats.add(StageStat("S6 freshness", len(candidates), len(candidates), skipped=True,
                             note="disabled -> RRF 점수 그대로"))
+
+    # --- S8 스노우볼링 --------------------------------------------------------
+    # freshness 뒤, diversity 앞에 둡니다: 랭킹된 상위권을 시드로 삼아야 좋은 이웃이
+    # 나오고, 유입된 논문도 다양성 선택의 후보가 되어야 하기 때문입니다.
+    if cfg.snowball:
+        from survey_search.core.expand import snowball as run_snowball
+
+        t = time.perf_counter()
+        added, sstats = run_snowball(candidates, backend=backend,
+                                     config=cfg.snowball_config)
+        if not sstats.supported:
+            stats.add(StageStat("S8 snowball", len(candidates), len(candidates),
+                                skipped=True, note=sstats.note))
+            stats.warn("백엔드가 인용 엣지를 몰라 스노우볼링을 건너뛰었습니다 "
+                       "(OnlineBackend/HybridBackend 가 필요합니다)")
+        elif added:
+            # 유입 논문의 점수(시드 지지도)는 RRF 점수와 스케일이 아예 다릅니다.
+            # 그래서 S4 와 같은 이유로 **순위 기반 RRF** 로 융합합니다. 점수를 임의로
+            # 깎아 바닥에 깔면 유입 논문이 최종 컷에 영원히 못 들어옵니다(실제로 겪었습니다).
+            before = len(candidates)
+            existing_rank = [p.paper_id for p in candidates]
+            snow_rank = [p.paper_id for p in added]
+            fused_scores = dict(rrf([existing_rank, snow_rank], k=cfg.rrf_k))
+
+            pool = {p.paper_id: p for p in candidates}
+            pool.update({p.paper_id: p for p in added if p.paper_id not in pool})
+            candidates = sorted(
+                (Paper(**{**p.__dict__, "score": fused_scores.get(pid, 0.0)})
+                 for pid, p in pool.items()),
+                key=lambda p: (-p.score, p.paper_id),
+            )
+            stats.add(StageStat("S8 snowball", before, len(candidates),
+                                elapsed_s=_elapsed(t), note=sstats.note))
+        else:
+            stats.add(StageStat("S8 snowball", len(candidates), len(candidates),
+                                elapsed_s=_elapsed(t),
+                                note=f"{sstats.note} (유입 0편)"))
+            if sstats.n_dropped_by_cap:
+                stats.warn(f"스노우볼링 유입을 상한으로 잘라 {sstats.n_dropped_by_cap:,}편 제외")
+            if sstats.n_meta_missing:
+                stats.warn(f"스노우볼링: 엣지로 나온 {sstats.n_meta_missing:,}편의 "
+                           f"메타데이터를 못 구해 제외")
+            for e in sstats.errors[:3]:
+                stats.warn(f"스노우볼링 오류: {e}")
+    else:
+        stats.add(StageStat("S8 snowball", len(candidates), len(candidates),
+                            skipped=True, note="disabled"))
 
     # --- S7 diversity -------------------------------------------------------
     if cfg.diversity:
