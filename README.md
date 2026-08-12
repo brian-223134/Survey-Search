@@ -53,7 +53,7 @@ topic: str  →  ranked · deduped · facet-grouped papers
 | **P2** facet · freshness · 다양성 | ✅ 완료 — S1(OpenRouter) · S6 · S7 전부 동작 |
 | **P3** 어댑터 · CLI | 🟡 어댑터 시그니처·CLI 완료. **서베이 생성 스모크는 승인 대기** |
 | **P4** 진단 하네스 | ✅ 완료 — stats · 최신성 · 커버리지 · 베이스라인 대조 · 회귀 스냅샷 |
-| 평가 | ❌ SurGE 평가 코드가 미공개라 후속으로 미룸 |
+| 평가 | 🟡 **가능한 것으로 확인됨** — SurGE GT 서베이 205편의 인용 목록이 정답 집합. 우리 코퍼스와 91.4% 연결 ([TASKS.md](TASKS.md) §5.5) |
 
 테스트 101개 통과. 실측 결과표는 [`TASKS.md`](TASKS.md) 에 있습니다.
 
@@ -135,5 +135,6 @@ S2ORC 본문 + verl RL 스택이고, 우리는 FAISS + gte + arXiv 초록 + 규�
 
 - [`../SimScholarSearch`](../SimScholarSearch) — 이 프로젝트의 모태. 위 표 참조
 - [`../AutoSurvey`](../AutoSurvey), [`../SurveyForge`](../SurveyForge) — 1차 소비자
-- [`../SurGE`](../SurGE) — 후속 평가 대상 (SIGIR 2026, GT 서베이 205편 + topic→publication 매핑).
-  벤치마크 구현 코드가 전부 공개되지 않아 지금 단계에서는 보류
+- [`../SurGE`](../SurGE) — 평가 대상 (SIGIR 2026). **`data/queries.json` 은 없지만
+  `data/surveys.json` 의 205편 × `all_cites` 가 그대로 정답 집합입니다.** 제목 정규화로
+  우리 코퍼스와 91.4% 연결됩니다 — [TASKS.md §5.5](TASKS.md) 참조
