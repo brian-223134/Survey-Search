@@ -7,7 +7,7 @@ AutoSurvey · SurveyForge · SurveyX 등 여러 서베이 에이전트가 공유
 topic: str  →  ranked · deduped · facet-grouped papers
 ```
 
-**최종 갱신**: 2026-08-12 · 테스트 124개 통과
+**최종 갱신**: 2026-08-12 · 테스트 134개 통과
 
 ---
 
@@ -68,9 +68,189 @@ topic
 - **결정적 파이프라인** — LLM은 facet 분해에만 쓰고 결과를 캐시합니다. 온라인 호출도
   전부 캐시합니다. 같은 입력이면 같은 결과입니다
 - **무음 폐기 금지** — 필터·윈도우·컷오프가 버린 논문 수는 반드시 세어서 `stats` 에
-  남깁니다. 이 원칙이 실제로 버그를 다섯 번 잡았습니다(§5)
+  남깁니다. 이 원칙이 실제로 버그를 다섯 번 잡았습니다(§7)
 
-## 3. 결과 — 방향 지표
+## 3. 구조
+
+```
+src/survey_search/
+├── types.py            Paper · Facet · SearchConfig · SearchStats
+├── assets.py           자산 경로·상수 한 곳 모음 (경로 하드코딩 방지)
+├── search.py           오케스트레이터 — search_topic()
+│
+├── backends/           코퍼스를 아는 유일한 계층
+│   ├── base.py         Backend 프로토콜 (필수 4 + 선택 2)
+│   ├── faiss_duckdb.py FAISS(dense) + DuckDB(BM25·메타)  ← 1차 백엔드
+│   ├── online.py       arXiv API + Semantic Scholar (인용 엣지)
+│   └── hybrid.py       로컬 + 온라인 합성
+│
+├── core/               파이프라인 단계. 각각 독립적으로 끌 수 있음
+│   ├── facets.py       S1  토픽 → facet (LLM + 디스크 캐시)
+│   ├── fuse.py         S4  RRF
+│   ├── dedup.py        S5  버전 병합 + 제목 정규화
+│   ├── rank.py         S6  freshness (연령 정규화 인용률 + recency)
+│   ├── expand.py       S8  인용 스노우볼링
+│   └── diversity.py    S7  MMR + facet 쿼터
+│
+├── adapters/           호스트 에이전트 호환 계층 (정본 아님)
+│   ├── autosurvey.py   database 드롭인
+│   └── surveyforge.py  GeneralRAG_langchain 드롭인
+│
+├── index/              자산 준비·검증
+│   ├── inspect_faiss.py  id 매핑 실측, 지연 측정
+│   └── build_duckdb.py   TinyDB JSON → DuckDB + FTS
+│
+├── metrics/            지표
+│   ├── diagnostics.py  정답 없이 재는 진단 (최신성·커버리지·대조)
+│   └── paper_set.py    정답 있을 때의 채점 (recall·nDCG)
+│
+├── eval/               정량 평가
+│   ├── surge.py        SurGE 정답 집합 구축 + ablation
+│   └── ceiling.py      검색 병목인가 랭킹 병목인가
+│
+└── cli.py              토픽 → JSON, --ablate 비교표
+```
+
+의존 방향은 한쪽입니다. **`core/` 는 백엔드를 모르고, 백엔드는 `core/` 를 모릅니다.**
+둘을 아는 것은 `search.py` 하나뿐입니다. 그래서 백엔드를 갈아 끼워도 파이프라인이
+그대로이고, 단계를 추가해도 백엔드를 안 건드립니다.
+
+### Backend 프로토콜
+
+백엔드가 구현할 것은 이게 전부입니다.
+
+```python
+def dense_search(queries: list[str], top_k: int, field: str) -> list[list[Hit]]
+def lexical_search(queries: list[str], top_k: int)             -> list[list[Hit]]
+def get_papers(paper_ids: list[str])                           -> list[Paper]
+def filter_ids(*, date_min, date_max, categories)              -> set[str] | None
+
+# 선택 — 없으면 해당 단계가 no-op 이 되고 그 사실이 stats 에 남습니다
+def references(paper_id: str) -> list[str]
+def cited_by(paper_id: str)   -> list[str]
+```
+
+두 가지가 의도적입니다.
+
+**① 검색이 배치입니다.** facet fan-out 이 기본 사용 패턴이고, 실측상 배치가 쿼리당
+9배 빠릅니다(1쿼리 790ms vs 32쿼리 배치 85ms/쿼리). 쿼리 하나씩 도는 API 는 아예
+만들지 않았습니다.
+
+**② `filter_ids` 의 `None` 과 빈 집합은 뜻이 다릅니다.** `None` = 제한 없음,
+`set()` = 조건에 맞는 논문이 하나도 없음. 이걸 섞으면 필터가 조용히 무력화됩니다.
+
+## 4. 각 단계가 하는 일
+
+### S1 facet 분해 — 쿼리 하나로는 이웃 한 덩어리밖에 못 본다
+
+토픽 문자열 하나는 임베딩 공간의 점 하나입니다. 그 근처만 보게 되고, 새로 생긴 하위
+분야는 **용어 자체가 새로워서** 그 근처에 없습니다.
+
+LLM 에게 토픽을 하위 주제 8~16개로 쪼개게 하고, facet 마다 표면형이 다른 쿼리를
+1~3개 받습니다 — `"RAG"` / `"retrieval-augmented generation"` / `"retrieval augmented LM"`.
+방법론·모델·데이터셋 이름을 넣도록 프롬프트에서 요구합니다. 실제로 Self-RAG · IRCoT ·
+DPR · FEVER · CodeT5 같은 이름이 나오고, **이게 dense 임베딩이 구조적으로 못 잡는
+바로 그 토큰들입니다.**
+
+- 결과는 `{topic_hash}.json` 으로 캐시 → 같은 토픽 재실행은 LLM 호출 0회
+- 한계: LLM 의 **사전 지식**에 의존하므로 모델 컷오프 이후 신조어는 못 냅니다.
+  그 구멍을 S3(BM25)와 S8(스노우볼링)이 메우는 구조입니다
+- 실패하면 규칙 기반으로 내려가되 **그 사실을 stats 에 남깁니다.** 조용히 "토픽 1쿼리"로
+  되돌아가면 facet 을 켠 실험과 끈 실험이 구분되지 않습니다
+
+### S2·S3 dense + 어휘 — 서로 다른 것을 놓친다
+
+dense 는 "말이 비슷한 논문", BM25 는 "단어가 겹치는 논문"을 찾습니다. 새 방법론 이름·
+모델명·데이터셋명·약어는 후자의 영역이고, **최신 논문을 식별하는 토큰이 정확히 그것들**입니다.
+실측: BM25 는 dense 가 전혀 못 찾은 논문 234편을 데려왔습니다.
+
+### S4 RRF — 점수가 아니라 순위로 합친다
+
+```
+score(d) = Σ_q  1 / (k + rank_q(d)),   k = 60
+```
+
+**이 인덱스에서는 선택이 아니라 필수 조건입니다.** 저장된 문서 벡터는 단위 norm 인데
+gte 가 내놓는 쿼리 벡터는 정규화돼 있지 않습니다(norm ≈ 24). 한 쿼리 안의 순위는
+멀쩡하지만 **쿼리끼리 점수를 비교할 수 없습니다.** BM25 점수는 dense 와 단위가 아예
+다릅니다. 순위만 쓰면 이 문제가 사라집니다.
+
+2단으로 적용합니다: ① facet 내부에서 dense+BM25 융합 → ② facet 간 융합. 나누는 이유는
+facet 소속 정보를 살려 S7 의 쿼터를 걸기 위해서이고, 한 번에 다 섞으면 쿼리를 많이 가진
+facet 이 결과를 지배하기 때문입니다.
+
+### S5 중복 제거
+
+`2401.12345v1` 과 `v2` 를 병합합니다 — 대표는 최신 버전, 점수는 최대값. 대표와 점수를
+따로 정하는 이유는, 버전이 갈리면 같은 논문의 순위가 반토막 나기 때문입니다.
+제목 정규화(소문자·영숫자만) 일치도 병합합니다. 실측상 이 코퍼스에 정규화 제목이
+겹치는 그룹이 806개 있어 죽은 코드가 아닙니다.
+
+### S6 freshness — 절대 인용수가 아니라 또래 대비 속도
+
+```
+final = rrf × (1 + α·citation_rate_percentile) × (1 + β·recency_weight)
+citation_rate = citation_count / max(months_since_pub, 3)
+```
+
+2026년 논문의 인용수 3 과 2019년 논문의 인용수 3 은 전혀 다른 의미입니다. 그래서
+인용률을 **6개월 코호트 안에서의 백분위**로 바꿔 씁니다. 전체를 한 줄로 세우면 오래된
+논문이 상위 백분위를 독식합니다.
+
+곱셈인 이유: RRF 점수가 이미 "여러 검색이 얼마나 동의하는가"를 담고 있으므로 freshness 는
+그걸 **대체**하는 게 아니라 **조정**해야 합니다. 덧셈이면 관련 없는 최신 논문이 올라옵니다.
+
+recency 는 두 방식을 다 구현해 두고 고르게 했습니다:
+**weight**(연속 감쇠, 밀어주되 보장 없음) / **quota**(모든 접두구간에서 비율 보장, 대신 순위 왜곡).
+쿼터는 하한이지 상한이 아니므로, 이미 충족되면 아무것도 하지 않습니다(`promoted=0` 은
+고장이 아니라 "필요 없었다"는 뜻).
+
+### S8 스노우볼링 — 저자가 직접 선언한 관계
+
+인용은 임베딩 유사도도 어휘 겹침도 아닌 **제3의 신호**입니다. 저자가 "이 논문이 관련
+있다"고 명시한 것이고, 사람이 문헌조사하는 방식이기도 합니다.
+
+- **후방(references)** — 시드가 딛고 선 토대. 오래됐지만 확실히 관련 있음
+- **전방(cited_by)** — 시드 이후의 후속 연구. **컷오프 이후 논문이 여기서 나옵니다**
+
+여러 시드가 공통으로 가리킨 논문을 우선합니다(`min_seed_support`). 유입 논문의 점수
+(시드 지지도)는 RRF 점수와 스케일이 다르므로 **다시 RRF 로 융합**합니다 — 임의로 점수를
+깎아 붙이면 유입 논문이 최종 컷에 영원히 못 들어옵니다(§7).
+
+### S7 다양성 — 목적 함수가 정확도가 아니라 커버리지
+
+가장 관련 있는 1500편은 서로 매우 비슷합니다. 관련성만 최적화하면 한 연구 그룹·한
+계열로 쏠리고, 서베이의 섹션 하나가 통째로 빕니다.
+
+MMR: `λ·relevance − (1−λ)·max_sim(이미 고른 것)`. 유사도는 **인덱스에 저장된 초록
+임베딩**을 그대로 씁니다(재임베딩 0). 이미 고른 것과의 최대 유사도를 매번 전부 다시
+재면 O(k²n) 인데, 새로 고른 것 하나만 반영하면 O(kn) 입니다.
+
+> ⚠ **λ 를 낮게 잡지 마세요.** 방향 지표(유사도·카테고리 수)는 낮은 λ 를 선호하지만,
+> 정답 기준으로는 상위권을 심하게 망가뜨립니다 — 예비 측정에서 λ=0.3 이 R@50 을
+> 13.4% → 2.2% 로 떨어뜨렸습니다. §6 의 평가가 이 값을 확정할 때까지 기본은 `diversity=False`.
+
+MMR 풀은 일부러 묶습니다(`mmr_pool`, 기본 `max(n×2, 3000)`). 관련성을 풀 안에서
+min-max 정규화하므로 풀이 커지면 대부분의 relevance 가 0 근처가 되고 다양성이
+관련성을 압도합니다. 실측(갱신일 기준으로 잰 값이라 §5 표와 절대값은 다릅니다):
+풀을 3,000 에서 48,214 로 키우자 최근 12개월 비율이 45.8% → 18.3% 로 무너졌습니다.
+
+### stats — 모든 단계가 자기가 버린 것을 신고한다
+
+```
+S2 dense          36 ->  72,000  17.07s
+S4 rrf       144,000 ->  48,257  0.21s
+S5 dedup      48,257 ->  48,214 -43 (version=28, title=15)  1.06s
+S7 diversity   3,000 ->   1,500 -1,500 (n_papers=1500)  0.14s
+warnings:
+  ! MMR 풀을 3,000편으로 제한 — 45,214편은 S7 대상에서 제외
+```
+
+`dropped` 는 `in - out` 을 계산한 값이 **아니라 단계가 스스로 센 값**입니다. 둘이
+다르면 그 자체가 버그 신호입니다. 껐거나 백엔드가 지원 안 해서 건너뛴 단계도
+`skipped=True` 로 남습니다 — 껐을 때와 고장 났을 때가 구분돼야 하기 때문입니다.
+
+## 5. 결과 — 방향 지표
 
 토픽 "RAG for LLMs", 1500편 기준. 논문 나이는 arXiv id 에서 유도한 **제출일 기준**입니다.
 
@@ -87,9 +267,9 @@ topic
 최종 1,500편 중 1,022편(68%)이 교체됐습니다.
 
 > 이 표는 **방향 지표**입니다. "얼마나 최신인가"·"얼마나 다양한가"만 재고 **"얼마나
-> 맞는가"는 재지 않습니다.** 정답 기준 평가는 §4 입니다.
+> 맞는가"는 재지 않습니다.** 정답 기준 평가는 §6 입니다.
 
-## 4. 정량 평가 — 정답 집합으로 재기
+## 6. 정량 평가 — 정답 집합으로 재기
 
 문서 초안 단계에서는 "SurGE 벤치마크 구현이 미공개라 정량 평가 보류"로 적어 두었는데,
 **직접 확인하니 그 전제가 틀렸습니다.**
@@ -115,7 +295,7 @@ python -m survey_search.eval.surge --build-gold    # 정답 캐시 (1회)
 python scripts/run_surge_eval.py --limit 40
 ```
 
-## 5. 구현 중 잡은 문제들
+## 7. 구현 중 잡은 문제들
 
 전부 "무음 폐기 금지" 원칙이 잡아냈습니다. `stats` 경고가 없었으면 조용히 넘어갔습니다.
 
@@ -129,7 +309,7 @@ python scripts/run_surge_eval.py --limit 40
 
 특히 마지막 둘은 기능이 "돌아가는 것처럼 보이면서" 아무 일도 안 하던 경우입니다.
 
-## 6. 알아야 할 제약
+## 8. 알아야 할 제약
 
 **① 로컬 코퍼스는 2026-08-04 스냅샷입니다.** 그 이후 arXiv 는 존재하지 않는 것으로
 취급됩니다. 랭킹 축의 최신성을 고쳐도 **데이터 축의 컷오프는 남습니다.** 이걸 메우려고
@@ -146,7 +326,7 @@ python scripts/run_surge_eval.py --limit 40
 
 **④ 초록만 있습니다.** 본문 전체가 없어 구절 단위 검색·본문 근거 추출은 못 합니다.
 
-## 7. 현재 상태
+## 9. 현재 상태
 
 | 항목 | 상태 |
 |---|---|
@@ -161,7 +341,7 @@ python scripts/run_surge_eval.py --limit 40
 내부 문서(`DESIGN.md` · `SETTING.md` · `TASKS.md`)는 이 저장소에 포함되지 않습니다
 (`.gitignore`). 설계 근거·환경 실측·단계별 결과표가 거기 있습니다.
 
-## 8. 확정된 결정
+## 10. 확정된 결정
 
 | 항목 | 결정 | 근거 |
 |---|---|---|
@@ -171,7 +351,7 @@ python scripts/run_surge_eval.py --limit 40
 | 벡터 DB | FAISS + DuckDB (Milvus 아님) | 이 머신에 docker 소켓 권한이 없음 |
 | 온라인 | 로컬을 **대체하지 않고 보강** | 로컬 = recall·결정성, 온라인 = 컷오프 이후 + 인용 엣지 |
 
-## 9. SimScholarSearch 에서 가져온 것
+## 11. SimScholarSearch 에서 가져온 것
 
 파생 프로젝트지만 코드 수준으로 가져올 수 있는 건 많지 않습니다. 그쪽은 Milvus + BGE-M3 +
 S2ORC 본문 + verl RL 스택이고, 우리는 FAISS + gte + arXiv 초록 + 규칙 기반이라 하부가
@@ -193,11 +373,11 @@ S2ORC 본문 + verl RL 스택이고, 우리는 FAISS + gte + arXiv 초록 + 규�
 > 두 프로젝트의 id 체계가 다릅니다 — 그쪽은 S2ORC 정수 `corpus_id`, 이쪽은 버전 접미사가
 > 붙은 arXiv 문자열 id. 이식한 코드에서 이 부분은 전부 바꿨습니다.
 
-## 10. 참고한 레포
+## 12. 참고한 레포
 
 | 레포 | 이 프로젝트와의 관계 |
 |---|---|
-| [SimScholarSearch](https://github.com/trillion-labs/SimScholarSearch) | 이 프로젝트의 모태. 가져온 것과 안 가져온 것은 §9 |
+| [SimScholarSearch](https://github.com/trillion-labs/SimScholarSearch) | 이 프로젝트의 모태. 가져온 것과 안 가져온 것은 §11 |
 | [AutoSurvey](https://github.com/AutoSurveys/AutoSurvey) | 1차 소비자. `database` 드롭인 어댑터 제공 |
 | [SurveyForge](https://github.com/InternScience/SurveyForge) | 1차 소비자. `retrieve_id` 드롭인 어댑터 제공. 1차 인덱스도 여기서 재사용 |
 | [SurGE](https://github.com/oneal2000/SurGE) | 평가 대상 (SIGIR 2026). GT 서베이 205편의 인용 목록이 정답 집합 |

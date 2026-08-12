@@ -126,3 +126,25 @@ def test_load_dotenv_does_not_override_existing(tmp_path, monkeypatch):
 
 def test_load_dotenv_missing_file_is_noop():
     assert load_dotenv("/nonexistent/.env") == 0
+
+
+def test_parse_rejects_empty_content_instead_of_crashing():
+    """OpenRouter 가 content=None 을 돌려주는 일이 실제로 있습니다.
+    AttributeError 로 터지면 decompose 의 fallback 이 못 잡아 배치 전체가 죽습니다."""
+    for bad in (None, "", "   ", "\n"):
+        with pytest.raises(ValueError, match="빈 응답"):
+            _parse_facets(bad, cfg())
+
+
+def test_decompose_falls_back_on_any_llm_error(tmp_path, monkeypatch):
+    """어떤 예외든 fallback 으로 흡수하고 사유를 남겨야 합니다."""
+    import survey_search.core.facets as F
+
+    def boom(topic, cfg):
+        raise AttributeError("'NoneType' object has no attribute 'strip'")
+
+    monkeypatch.setattr(F, "_call_openrouter", boom)
+    facets, stats = F.decompose("T", config=FacetConfig(api_key="k", cache_dir=tmp_path))
+    assert stats.source == "fallback"
+    assert facets
+    assert any("AttributeError" in w for w in stats.warnings)

@@ -127,8 +127,16 @@ def cache_key(topic: str, cfg: FacetConfig) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
-def _parse_facets(text: str, cfg: FacetConfig) -> list[Facet]:
-    """LLM 응답에서 facet 을 뽑습니다. 마크다운 펜스와 앞뒤 산문을 견딥니다."""
+def _parse_facets(text: str | None, cfg: FacetConfig) -> list[Facet]:
+    """LLM 응답에서 facet 을 뽑습니다. 마크다운 펜스와 앞뒤 산문을 견딥니다.
+
+    **빈 응답도 여기서 걸러야 합니다.** OpenRouter 는 가끔 `content: null` 을 돌려주는데
+    (거부·필터·프로바이더 이상), 이걸 그대로 `.strip()` 하면 `AttributeError` 가 나고
+    `decompose` 의 fallback 이 그 예외를 안 잡아서 **호출 전체가 죽습니다.**
+    3시간짜리 평가가 LLM 응답 하나 때문에 중단된 적이 실제로 있습니다.
+    """
+    if not text or not text.strip():
+        raise ValueError("LLM 이 빈 응답을 돌려줬습니다 (content=None 또는 공백)")
     t = text.strip()
     if t.startswith("```"):
         t = re.sub(r"^```[a-zA-Z]*\n?", "", t)
@@ -174,8 +182,13 @@ def _call_openrouter(topic: str, cfg: FacetConfig) -> str:
         try:
             with urllib.request.urlopen(req, timeout=cfg.timeout_s) as r:
                 payload = json.loads(r.read())
-            return payload["choices"][0]["message"]["content"]
-        except (urllib.error.URLError, KeyError, json.JSONDecodeError, TimeoutError) as e:
+            content = payload["choices"][0]["message"]["content"]
+            if not content:
+                # 빈 응답은 재시도할 가치가 있습니다 — 프로바이더 일시 장애일 수 있습니다.
+                raise ValueError(f"content 가 비어 있음: {str(payload)[:200]}")
+            return content
+        except (urllib.error.URLError, KeyError, IndexError, TypeError, ValueError,
+                json.JSONDecodeError, TimeoutError) as e:
             last = e
             if attempt < cfg.max_retries:
                 wait = 2 ** attempt
@@ -238,10 +251,14 @@ def decompose(
             facets = _parse_facets(raw, cfg)
             stats.source = "llm"
             stats.llm_calls = 1
-        except (RuntimeError, ValueError, json.JSONDecodeError) as e:
+        except Exception as e:  # noqa: BLE001
+            # **넓게 잡는 것이 의도입니다.** facet 분해는 파이프라인의 편의 기능이지
+            # 필수가 아닙니다. 여기서 올라간 예외 하나가 배치 실행 전체를 죽이면
+            # 안 됩니다 — 실제로 AttributeError 하나에 3시간 평가가 중단됐습니다.
+            # 대신 실패 사실과 사유를 반드시 남깁니다.
             facets = fallback_facets(topic)
             stats.source = "fallback"
-            stats.warnings.append(f"LLM facet 분해 실패 -> fallback: {e}")
+            stats.warnings.append(f"LLM facet 분해 실패 -> fallback: {type(e).__name__}: {e}")
             log.warning("facet 분해 실패, fallback 사용: %s", e)
 
     stats.n_facets = len(facets)
