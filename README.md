@@ -68,9 +68,148 @@ topic
 - **결정적 파이프라인** — LLM은 facet 분해에만 쓰고 결과를 캐시합니다. 온라인 호출도
   전부 캐시합니다. 같은 입력이면 같은 결과입니다
 - **무음 폐기 금지** — 필터·윈도우·컷오프가 버린 논문 수는 반드시 세어서 `stats` 에
-  남깁니다. 이 원칙이 실제로 버그를 다섯 번 잡았습니다(§7)
+  남깁니다. 이 원칙이 실제로 버그를 다섯 번 잡았습니다(§8)
 
-## 3. 구조
+## 3. 설치와 사용
+
+### 요구사항
+
+| | |
+|---|---|
+| Python | 3.10+ |
+| 인덱스 | SurveyForge 2026-08 스냅샷 (FAISS 3.7GB × 2 + TinyDB 1.4GB) |
+| GPU | 쿼리 임베딩용. 없으면 CPU 로 자동 폴백(느리지만 동작) |
+| 디스크 | DuckDB 산출물 1.1GB |
+
+### 설치
+
+```bash
+git clone https://github.com/brian-223134/Survey-Search.git survey-search
+cd survey-search
+
+virtualenv -p python3.10 .venv          # python3 -m venv 가 막힌 환경이면 이걸로
+.venv/bin/pip install -e .
+
+# GPU 를 쓸 경우 드라이버에 맞는 torch 를 고정하세요.
+# CUDA 12.4 (드라이버 550.x) 예시:
+.venv/bin/pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+```
+
+> torch 기본 휠은 최신 드라이버를 요구합니다. 맞지 않으면 GPU 를 못 잡고 CPU 로
+> 폴백하는데, 그 사실이 로그에 남으니 확인하세요.
+
+### 인덱스 준비
+
+`SURVEY_SEARCH_SF_DB` 로 FAISS/TinyDB 위치를 알려 준 뒤 DuckDB 를 만듭니다 (약 90초).
+
+```bash
+export SURVEY_SEARCH_SF_DB=/path/to/database_2026-08
+.venv/bin/python -m survey_search.index.build_duckdb      # -> data/papers.duckdb
+
+# 인덱스가 멀쩡한지 확인 (id 매핑 왕복 + 지연 측정)
+.venv/bin/python -m survey_search.index.inspect_faiss --probe 10
+.venv/bin/python -m pytest tests/ -q
+```
+
+### 환경변수
+
+`.env.example` 을 복사해 채웁니다. **키가 없어도 검색은 돌아갑니다** — facet 분해만
+규칙 기반으로 내려가고 그 사실이 `stats` 에 남습니다.
+
+```bash
+cp .env.example .env && chmod 600 .env
+```
+
+| 변수 | 필요한 때 |
+|---|---|
+| `OPENROUTER_API_KEY` | S1 facet 분해 (토픽당 1회, 캐시됨) |
+| `SEMANTIC_SCHOLAR_API_KEY` | S8 스노우볼링 / 온라인 백엔드 |
+| `SURVEY_SEARCH_SF_DB` | 인덱스 경로 (기본값이 맞으면 불필요) |
+| `SURVEY_SEARCH_DATA_DIR` | 산출물 경로 (기본 `./data`) |
+
+### 쓰는 법 — 새 프로젝트
+
+```python
+from survey_search.core.facets import load_dotenv; load_dotenv(".env")
+from survey_search.backends.faiss_duckdb import FaissDuckDBBackend
+from survey_search.search import search_topic
+from survey_search.types import SearchConfig
+
+backend = FaissDuckDBBackend()      # 재사용하세요. 첫 검색만 12초(인덱스 로드), 이후 0.1초
+
+result = search_topic(
+    "Retrieval-Augmented Generation for Large Language Models",
+    backend=backend,
+    config=SearchConfig(n_papers=1500, facets=True, freshness=True),   # 권장 기본값
+)
+
+result.ids()                  # ['2401.12345v2', ...] 랭킹 순
+result.papers[0].title        # Paper: paper_id/base_id/title/abstract/date/
+                              #        submitted_date/categories/citation_count/
+                              #        score/facets/provenance
+result.facets                 # facet별 이름·쿼리·기여 논문
+print(result.stats.report())  # 단계별 in/out, 폐기 건수와 사유, 최신성 비율
+```
+
+### 쓰는 법 — CLI
+
+```bash
+.venv/bin/python -m survey_search.cli --topic "..." --facets --freshness --out results/
+.venv/bin/python -m survey_search.cli --topics-file topics.txt --all --out results/
+.venv/bin/python -m survey_search.cli --topic "..." --ablate --out results/   # 설정별 비교표
+```
+
+### 쓰는 법 — 기존 에이전트에 끼우기
+
+호스트 코드는 그대로 두고 import 한 줄만 바꿉니다.
+
+```python
+# AutoSurvey — src/database.py 의 database 대체
+from survey_search.adapters.autosurvey import SurveySearchDatabase as database
+
+# SurveyForge — code/src/rag.py 의 GeneralRAG_langchain 대체
+from survey_search.adapters.surveyforge import SurveySearchRAG
+rag = SurveySearchRAG(backend=FaissDuckDBBackend())
+```
+
+- `retrieve_id(query, rerank, filter, top_k, max_out)` 시그니처를 그대로 받습니다
+- `rerank='citation'` 은 **freshness 랭킹으로 대체**되고, 그 사실이
+  `rag.last_stats.warnings` 에 남습니다. A/B 비교 보고에 반드시 명시하세요
+- AutoSurvey 어댑터는 **SurveyForge 스냅샷의 id** 를 돌려줍니다. 모든 논문 조회가
+  어댑터를 거쳐야 하고, 본문(`paper_content.h5`)을 읽는 경로는 id 가 안 맞아
+  `NotImplementedError` 를 냅니다
+
+### 설정 스위치 = 실험 축
+
+| 옵션 | 기본 | 권장 | 하는 일 |
+|---|---|---|---|
+| `facets` | `False` | **켜기** | S1. LLM 이 토픽을 하위 주제로 분해. **기여가 가장 큽니다** |
+| `lexical` | `True` | 켜기 | S3. BM25. 꼬리 recall 을 늘립니다 |
+| `freshness` | `False` | **켜기** | S6. 연령 정규화 인용률 + recency |
+| `diversity` | `False` | **끄기** | S7. MMR. **정답 기준으로 항상 손해였습니다**(§7) |
+| `snowball` | `False` | 선택 | S8. 인용 그래프 확장. 온라인/하이브리드 백엔드 필요 |
+| `n_papers` | `1500` | — | 최종 반환 편수 |
+| `date_min` / `date_max` | `None` | — | 날짜 컷오프 (**제출일 기준**) |
+
+### 온라인 확장 (선택)
+
+로컬 스냅샷이 못 하는 두 가지 — 컷오프 이후 논문과 인용 엣지 — 를 메웁니다.
+
+```python
+from survey_search.backends.online import OnlineBackend
+from survey_search.backends.hybrid import HybridBackend
+from survey_search.core.expand import SnowballConfig
+
+backend = HybridBackend(FaissDuckDBBackend(), OnlineBackend())
+result = search_topic(topic, backend=backend, config=SearchConfig(
+    n_papers=1500, facets=True, freshness=True, snowball=True,
+    snowball_config=SnowballConfig(n_seeds=15, max_new=800)))
+```
+
+응답은 전부 디스크에 캐시되므로 **두 번째 실행부터 네트워크 0회**이고 결과가 재현됩니다.
+arXiv 는 초당 1회 제한을 지키느라 쿼리당 3초가 듭니다(facet 36쿼리면 2분).
+
+## 4. 구조
 
 ```
 src/survey_search/
@@ -139,7 +278,7 @@ def cited_by(paper_id: str)   -> list[str]
 **② `filter_ids` 의 `None` 과 빈 집합은 뜻이 다릅니다.** `None` = 제한 없음,
 `set()` = 조건에 맞는 논문이 하나도 없음. 이걸 섞으면 필터가 조용히 무력화됩니다.
 
-## 4. 각 단계가 하는 일
+## 5. 각 단계가 하는 일
 
 ### S1 facet 분해 — 쿼리 하나로는 이웃 한 덩어리밖에 못 본다
 
@@ -215,7 +354,7 @@ recency 는 두 방식을 다 구현해 두고 고르게 했습니다:
 
 여러 시드가 공통으로 가리킨 논문을 우선합니다(`min_seed_support`). 유입 논문의 점수
 (시드 지지도)는 RRF 점수와 스케일이 다르므로 **다시 RRF 로 융합**합니다 — 임의로 점수를
-깎아 붙이면 유입 논문이 최종 컷에 영원히 못 들어옵니다(§7).
+깎아 붙이면 유입 논문이 최종 컷에 영원히 못 들어옵니다(§8).
 
 ### S7 다양성 — 목적 함수가 정확도가 아니라 커버리지
 
@@ -226,9 +365,10 @@ MMR: `λ·relevance − (1−λ)·max_sim(이미 고른 것)`. 유사도는 **�
 임베딩**을 그대로 씁니다(재임베딩 0). 이미 고른 것과의 최대 유사도를 매번 전부 다시
 재면 O(k²n) 인데, 새로 고른 것 하나만 반영하면 O(kn) 입니다.
 
-> ⚠ **λ 를 낮게 잡지 마세요.** 방향 지표(유사도·카테고리 수)는 낮은 λ 를 선호하지만,
-> 정답 기준으로는 상위권을 심하게 망가뜨립니다 — 예비 측정에서 λ=0.3 이 R@50 을
-> 13.4% → 2.2% 로 떨어뜨렸습니다. §6 의 평가가 이 값을 확정할 때까지 기본은 `diversity=False`.
+> ⚠ **측정 결과 이 단계는 켜지 않는 것이 낫습니다.** 방향 지표(유사도·카테고리 수)는
+> 낮은 λ 를 선호하지만, 정답 기준으로는 λ=0.9 조차 안 켜는 쪽보다 나쁩니다. λ=0.3 은
+> R@50 을 19.4% → 9.4% 로 반토막 냅니다(§7). 기본값 `diversity=False` 를 유지하세요.
+> 코드는 남겨 둡니다 — 커버리지가 목적 함수인 다른 설정에서는 다를 수 있습니다.
 
 MMR 풀은 일부러 묶습니다(`mmr_pool`, 기본 `max(n×2, 3000)`). 관련성을 풀 안에서
 min-max 정규화하므로 풀이 커지면 대부분의 relevance 가 0 근처가 되고 다양성이
@@ -250,7 +390,7 @@ warnings:
 다르면 그 자체가 버그 신호입니다. 껐거나 백엔드가 지원 안 해서 건너뛴 단계도
 `skipped=True` 로 남습니다 — 껐을 때와 고장 났을 때가 구분돼야 하기 때문입니다.
 
-## 5. 결과 — 방향 지표
+## 6. 결과 — 방향 지표
 
 토픽 "RAG for LLMs", 1500편 기준. 논문 나이는 arXiv id 에서 유도한 **제출일 기준**입니다.
 
@@ -266,10 +406,12 @@ warnings:
 최근 12개월 비율 25.1% → 34.9%(+9.8%p), 상위 200편의 평균 쌍별 유사도 0.797 → 0.630,
 최종 1,500편 중 1,022편(68%)이 교체됐습니다.
 
-> 이 표는 **방향 지표**입니다. "얼마나 최신인가"·"얼마나 다양한가"만 재고 **"얼마나
-> 맞는가"는 재지 않습니다.** 정답 기준 평가는 §6 입니다.
+> ⚠ 이 표는 **방향 지표**입니다. "얼마나 최신인가"·"얼마나 다양한가"만 재고 **"얼마나
+> 맞는가"는 재지 않습니다.** 실제로 §7 의 정답 기준 평가는 **다양성(MMR)에 대해
+> 정반대 결론**을 냈습니다 — 이 표에서 가장 좋아 보이는 '전부 켜기' 가 정답 기준으로는
+> facet 만 켠 것보다 나쁩니다. 두 표를 반드시 같이 읽으세요.
 
-## 6. 정량 평가 — 정답 집합으로 재기
+## 7. 정량 평가 — 정답 집합으로 재기
 
 문서 초안 단계에서는 "SurGE 벤치마크 구현이 미공개라 정량 평가 보류"로 적어 두었는데,
 **직접 확인하니 그 전제가 틀렸습니다.**
@@ -291,11 +433,43 @@ warnings:
 만큼 자동으로 깎입니다. 서베이마다 `date_max=<게시일>` 을 겁니다.
 
 ```bash
-python -m survey_search.eval.surge --build-gold    # 정답 캐시 (1회)
-python scripts/run_surge_eval.py --limit 40
+python -m survey_search.eval.surge --build-gold    # 정답 캐시 (1회, 약 3분)
+python scripts/run_surge_eval.py --limit 16        # 설정별 recall/nDCG
+python -m survey_search.eval.ceiling --limit 25    # 검색 병목인가 랭킹 병목인가
 ```
 
-## 7. 구현 중 잡은 문제들
+### 결과 (토픽 16개, 평균 정답 87편, n_papers=1500)
+
+| 설정 | R@50 | R@100 | R@500 | R@1500 | nDCG |
+|---|---|---|---|---|---|
+| dense only | 16.4% | 21.2% | 37.0% | 39.0% | 0.189 |
+| + BM25 | 13.4% | 19.9% | 34.7% | **42.4%** | 0.189 |
+| + freshness | 13.9% | 20.6% | 35.8% | **42.4%** | 0.218 |
+| **+ facets** | **19.4%** | **24.6%** | **45.1%** | **59.1%** | **0.288** |
+| + MMR λ=0.9 | 19.2% | 24.1% | 44.6% | 56.5% | 0.285 |
+| + MMR λ=0.7 | 18.4% | 23.7% | 40.1% | 52.1% | 0.279 |
+| + MMR λ=0.3 | 9.4% | 14.0% | 20.1% | 38.3% | 0.182 |
+
+**① facet 분해가 압도적입니다.** R@1500 39.0% → 59.1%, nDCG 0.189 → 0.288(+52%).
+방향 지표에서도 기여가 가장 컸는데 정답 기준으로도 그렇습니다. LLM 이 내놓는
+방법론·데이터셋 이름이 dense 임베딩의 사각지대를 정확히 메운다는 가설이 확인됩니다.
+
+**② 다양성(MMR)은 정답 기준으로 항상 손해였습니다.** λ 를 0.9 까지 올려도 안 켜는
+쪽이 낫고, 0.3 은 R@50 을 19.4% → 9.4% 로 반토막 냅니다. **방향 지표(유사도 0.63,
+카테고리 32개)는 정반대를 가리켰습니다** — 이 프로젝트에서 방향 지표만 믿으면 안
+된다는 것을 보여 주는 가장 분명한 사례입니다. 기본값을 `diversity=False` 로 둡니다.
+
+**③ BM25 는 머리를 깎고 꼬리를 늘립니다.** R@50 은 16.4% → 13.4% 로 내려가는데
+R@1500 은 39.0% → 42.4% 로 올라갑니다. 서베이는 수백~수천 편을 모으는 작업이므로
+꼬리 recall 이 더 중요하다고 보고 켜 둡니다. 다만 상위권만 쓰는 용도라면 끄는 게 낫습니다.
+
+**④ freshness 는 recall 을 안 건드리고 순서를 개선합니다.** R@1500 은 42.4% 로 같은데
+nDCG 가 0.189 → 0.218 로 오릅니다. 같은 논문을 더 앞에 놓는다는 뜻입니다.
+
+> ⚠ 표본 16개입니다. ①②는 격차가 커서 뒤집히기 어렵지만, ③④는 표본을 늘려야
+> 확정할 수 있습니다. recall 상한이 100% 가 아니라 **약 93%** 라는 점도 같이 보세요.
+
+## 8. 구현 중 잡은 문제들
 
 전부 "무음 폐기 금지" 원칙이 잡아냈습니다. `stats` 경고가 없었으면 조용히 넘어갔습니다.
 
@@ -309,7 +483,7 @@ python scripts/run_surge_eval.py --limit 40
 
 특히 마지막 둘은 기능이 "돌아가는 것처럼 보이면서" 아무 일도 안 하던 경우입니다.
 
-## 8. 알아야 할 제약
+## 9. 알아야 할 제약
 
 **① 로컬 코퍼스는 2026-08-04 스냅샷입니다.** 그 이후 arXiv 는 존재하지 않는 것으로
 취급됩니다. 랭킹 축의 최신성을 고쳐도 **데이터 축의 컷오프는 남습니다.** 이걸 메우려고
@@ -326,7 +500,7 @@ python scripts/run_surge_eval.py --limit 40
 
 **④ 초록만 있습니다.** 본문 전체가 없어 구절 단위 검색·본문 근거 추출은 못 합니다.
 
-## 9. 현재 상태
+## 10. 현재 상태
 
 | 항목 | 상태 |
 |---|---|
@@ -336,12 +510,12 @@ python scripts/run_surge_eval.py --limit 40
 | **P3** 어댑터 · CLI | 🟡 시그니처·CLI 완료. **서베이 생성 스모크는 승인 대기** |
 | **P4** 진단 하네스 | ✅ stats · 최신성 · 커버리지 · 베이스라인 대조 · 회귀 스냅샷 |
 | **P5.1 / 5.7** 스노우볼링 · 온라인 | ✅ arXiv API + S2 인용 그래프, 디스크 캐시 |
-| **P5.5** SurGE 정량 평가 | ✅ 하네스 완료, GT 토픽 170개 |
+| **P5.5** SurGE 정량 평가 | ✅ 하네스 완료 + 토픽 16개 측정. 170개 중 나머지는 미실행 |
 
 내부 문서(`DESIGN.md` · `SETTING.md` · `TASKS.md`)는 이 저장소에 포함되지 않습니다
 (`.gitignore`). 설계 근거·환경 실측·단계별 결과표가 거기 있습니다.
 
-## 10. 확정된 결정
+## 11. 확정된 결정
 
 | 항목 | 결정 | 근거 |
 |---|---|---|
@@ -351,7 +525,7 @@ python scripts/run_surge_eval.py --limit 40
 | 벡터 DB | FAISS + DuckDB (Milvus 아님) | 이 머신에 docker 소켓 권한이 없음 |
 | 온라인 | 로컬을 **대체하지 않고 보강** | 로컬 = recall·결정성, 온라인 = 컷오프 이후 + 인용 엣지 |
 
-## 11. SimScholarSearch 에서 가져온 것
+## 12. SimScholarSearch 에서 가져온 것
 
 파생 프로젝트지만 코드 수준으로 가져올 수 있는 건 많지 않습니다. 그쪽은 Milvus + BGE-M3 +
 S2ORC 본문 + verl RL 스택이고, 우리는 FAISS + gte + arXiv 초록 + 규칙 기반이라 하부가
@@ -373,11 +547,11 @@ S2ORC 본문 + verl RL 스택이고, 우리는 FAISS + gte + arXiv 초록 + 규�
 > 두 프로젝트의 id 체계가 다릅니다 — 그쪽은 S2ORC 정수 `corpus_id`, 이쪽은 버전 접미사가
 > 붙은 arXiv 문자열 id. 이식한 코드에서 이 부분은 전부 바꿨습니다.
 
-## 12. 참고한 레포
+## 13. 참고한 레포
 
 | 레포 | 이 프로젝트와의 관계 |
 |---|---|
-| [SimScholarSearch](https://github.com/trillion-labs/SimScholarSearch) | 이 프로젝트의 모태. 가져온 것과 안 가져온 것은 §11 |
+| [SimScholarSearch](https://github.com/trillion-labs/SimScholarSearch) | 이 프로젝트의 모태. 가져온 것과 안 가져온 것은 §12 |
 | [AutoSurvey](https://github.com/AutoSurveys/AutoSurvey) | 1차 소비자. `database` 드롭인 어댑터 제공 |
 | [SurveyForge](https://github.com/InternScience/SurveyForge) | 1차 소비자. `retrieve_id` 드롭인 어댑터 제공. 1차 인덱스도 여기서 재사용 |
 | [SurGE](https://github.com/oneal2000/SurGE) | 평가 대상 (SIGIR 2026). GT 서베이 205편의 인용 목록이 정답 집합 |
