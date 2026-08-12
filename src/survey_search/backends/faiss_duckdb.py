@@ -160,15 +160,24 @@ class FaissDuckDBBackend:
         호출부가 `len(in) - len(out)` 으로 결측을 셀 수 있습니다."""
         if not paper_ids:
             return []
-        placeholders = ",".join("?" * len(paper_ids))
-        rows = self.con.execute(
-            f"""
-            SELECT paper_id, base_id, title, abstract, CAST(date AS VARCHAR),
-                   categories, citation_count
-            FROM papers WHERE paper_id IN ({placeholders})
-            """,
-            paper_ids,
-        ).fetchall()
+
+        # `IN (?, ?, ... )` 는 id 가 수천 개가 되면 급격히 느려집니다 (3,000개에 19.7초
+        # 실측). id 목록을 Arrow 테이블로 넘겨 조인하면 같은 일이 0.1초입니다.
+        # facet 을 켜면 후보가 수만 편이 되므로 이 차이가 파이프라인 전체를 좌우합니다.
+        import pyarrow as pa
+
+        ids_tbl = pa.table({"paper_id": pa.array(paper_ids, pa.string())})
+        self.con.register("wanted", ids_tbl)
+        try:
+            rows = self.con.execute(
+                """
+                SELECT p.paper_id, p.base_id, p.title, p.abstract, CAST(p.date AS VARCHAR),
+                       p.categories, p.citation_count
+                FROM papers p JOIN wanted w USING (paper_id)
+                """
+            ).fetchall()
+        finally:
+            self.con.unregister("wanted")
 
         by_id = {
             r[0]: Paper(

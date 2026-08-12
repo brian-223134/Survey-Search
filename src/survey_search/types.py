@@ -176,6 +176,23 @@ class SearchConfig:
     #: S6 설정. None 이면 기본값(alpha=beta=0.5, WEIGHT 모드)
     freshness_config: object | None = None
 
+    #: S1 설정 (FacetConfig). None 이면 기본값 + 환경변수
+    facet_config: object | None = None
+
+    #: S5 제목 병합 / S6·S7 랭킹이 실제로 보는 후보 수. None 이면 후보 전체.
+    #: facet 을 켜면 후보가 수만 편이 되는데, 여기를 작게 잡으면 S6·S7 이 RRF 상위
+    #: 일부만 재정렬하게 되어 **단계의 효과가 구조적으로 축소됩니다.**
+    #: 값을 줄이면 그만큼 제외된 건수가 stats.warnings 에 남습니다.
+    rank_window: int | None = None
+    title_window: int | None = None
+
+    #: S7 MMR 이 실제로 훑는 후보 수. **None 이 아니라 기본값이 있는 이유**:
+    #: MMR 은 후보 풀이 커질수록 다양성 쪽으로 쏠립니다. 관련성을 풀 안에서 min-max
+    #: 정규화하므로, 4만 편을 넣으면 대부분의 relevance 가 0 근처가 되고 λ 가 의도한
+    #: 균형이 깨집니다. 실측: 풀 3,000 → 12개월 44.5%, 풀 48,214 → 18.3%.
+    #: 랭킹(S6)은 전량 처리해도 싸지만 MMR 은 풀을 묶어야 합니다.
+    mmr_pool: int | None = None   # None 이면 max(n_papers * 2, 3000)
+
     #: S7 — MMR 의 관련성/다양성 균형. 1.0 = 순수 관련성(= 끈 것과 같음), 0.0 = 순수 다양성
     mmr_lambda: float = 0.7
     #: S7 — facet 당 최소 배정. None 이면 n_papers // facet 수

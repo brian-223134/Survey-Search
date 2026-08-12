@@ -3,7 +3,7 @@
 import pytest
 
 from survey_search.core.dedup import dedup, normalize_title, strip_version, version_of
-from survey_search.core.fuse import provenance_of, rrf
+from survey_search.core.fuse import as_id_set, provenance_of, rrf
 
 
 def test_rrf_ignores_scores_uses_only_rank():
@@ -80,6 +80,20 @@ def test_dedup_keeps_papers_with_unknown_title():
     assert dropped["title"] == 0
 
 
+def test_as_id_set_accepts_both_shapes():
+    assert as_id_set([("a", 1.0), ("b", 2.0)]) == {"a", "b"}
+    assert as_id_set(["a", "b"]) == {"a", "b"}
+    s = {"a"}
+    assert as_id_set(s) is s      # 이미 집합이면 그대로 (재구성 비용 0)
+
+
 def test_provenance_labels_paths():
-    assert provenance_of("a", {"dense": [("a", 1.0)], "bm25": [("b", 1.0)]}) == ("dense",)
-    assert set(provenance_of("a", {"dense": ["a"], "bm25": ["a"]})) == {"dense", "bm25"}
+    dense = as_id_set([("a", 1.0)])
+    bm25 = as_id_set([("b", 1.0)])
+    assert provenance_of("a", {"dense": dense, "bm25": bm25}) == ("dense",)
+    both = as_id_set(["a"])
+    assert set(provenance_of("a", {"dense": both, "bm25": both})) == {"dense", "bm25"}
+
+
+def test_provenance_empty_when_no_source_matches():
+    assert provenance_of("z", {"dense": {"a"}, "bm25": {"b"}}) == ()

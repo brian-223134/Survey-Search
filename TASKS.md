@@ -87,11 +87,11 @@ facet 없이, 단일 쿼리로 dense+BM25+RRF+dedup까지. **여기까지가 "�
 
 | # | 작업 | 산출물 | 검증 |
 |---|---|---|---|
-| 2.1 | `core/facets.py` — LLM facet 분해 + 디스크 캐시 | facet 8~16개 | 같은 토픽 재실행 시 LLM 호출 0회 | ⬜ **OpenRouter 사용** |
-| 2.2 | facet fan-out 배선 (S2·S3 배치화) | 멀티쿼리 검색 | 단일 쿼리 대비 신규 논문 유입 수 | ⬜ |
-| 2.3 | `core/rank.py` — 연령 정규화 인용률 + recency | freshness 랭킹 | 최근 12개월 비율이 P1 대비 상승 | ✅ **완료** |
-| 2.4 | `core/diversity.py` — MMR + facet 쿼터 | 다양성 제어 | facet별 최소 배정 충족 | ✅ **완료** (쿼터는 P2.1 전까지 비활성) |
-| 2.5 | `SearchConfig` ablation 스위치 배선 | 단계 on/off | 전부 off = 베이스라인 재현 | 🟡 S1 빼고 전부 배선됨 |
+| 2.1 | `core/facets.py` — LLM facet 분해 + 디스크 캐시 | facet 8~16개 | ✅ **완료** — OpenRouter, 12 facet / 36 쿼리, 캐시 히트 시 호출 0회 |
+| 2.2 | facet fan-out 배선 (S2·S3 배치화) | 멀티쿼리 검색 | ✅ **완료** — 2단 RRF, 신규 745편 |
+| 2.3 | `core/rank.py` — 연령 정규화 인용률 + recency | freshness 랭킹 | ✅ **완료** — 12개월 비율 상승 확인 |
+| 2.4 | `core/diversity.py` — MMR + facet 쿼터 | 다양성 제어 | ✅ **완료** — 쿼터도 활성 (facet 12개) |
+| 2.5 | `SearchConfig` ablation 스위치 배선 | 단계 on/off | ✅ **완료** — `cli.py --ablate` |
 
 **P2 검증 기준**: 같은 토픽에서 `facets=False` 대비 `facets=True`의 신규 논문 유입 수와
 최근 12개월 비율 변화를 표로 낼 것. **이 표가 이 프로젝트의 첫 결과물입니다.**
@@ -143,9 +143,49 @@ facet 없이, 단일 쿼리로 dense+BM25+RRF+dedup까지. **여기까지가 "�
    늘었습니다. dense 이웃에서 벗어난 논문일수록 서로 다르기 때문입니다.
    S3와 S7이 같은 방향으로 작동한다는 뜻입니다.
 
-> **facet 쿼터는 아직 비활성입니다** — S1이 꺼져 있어 facet이 `(topic)` 하나뿐이라
-> 쿼터를 걸 대상이 없습니다. `facet_quota_applied=False` 로 stats 에 남습니다.
-> P2.1이 붙어야 이 절반이 살아납니다.
+> 위 표는 S1이 꺼진 상태(facet 1개)에서 잰 것이라 **facet 쿼터가 비활성**이었습니다.
+> P2.1을 붙인 뒤의 최종 수치는 아래 통합 표를 보세요.
+
+### P2 통합 실측 — 전 단계 누적 (2026-08-12, RAG for LLMs, n_papers=1500)
+
+| 설정 | 쿼리 | 후보 | 6m | 12m | 24m | 유사도 | 카테고리 | 베이스라인 대비 신규 |
+|---|---|---|---|---|---|---|---|---|
+| ① dense only | 1 | 1,996 | 16.9% | 35.5% | 69.7% | 0.7969 | 23 | — |
+| ② + BM25 | 1 | 2,903 | 16.9% | 36.6% | 71.7% | 0.7545 | 27 | 351 |
+| ③ + freshness | 1 | 2,903 | 19.5% | 39.8% | 74.0% | 0.7576 | 28 | 351 |
+| ④ + MMR λ=0.3 | 1 | 2,903 | 20.4% | 39.0% | 69.1% | 0.6327 | 31 | 852 |
+| ⑤ + facets | 36 | 48,214 | 23.1% | 45.1% | 75.7% | 0.7633 | 26 | 745 |
+| ⑥ **전부 켜기** | 36 | 48,214 | **25.1%** | **45.8%** | 70.7% | **0.6245** | **32** | **1,029** |
+
+**베이스라인 → 전부 켜기: 최근 12개월 비율 35.5% → 45.8%(+10.3%p), 유사도 0.797 → 0.625,
+카테고리 23 → 32개, 최종 1,500편 중 1,029편(69%)이 교체.** Jaccard 0.186입니다.
+
+기여도를 분리하면 **facet(S1)이 가장 큽니다** — 12개월 비율을 39.8% → 45.1%로 올립니다.
+LLM이 내놓은 쿼리에 Self-RAG · IRCoT · DPR · FEVER · CodeT5 같은 방법론·데이터셋 이름이
+들어가는데, 이게 dense 임베딩이 구조적으로 못 잡는 바로 그 토큰들입니다.
+
+> ⚠ **대가**: 인용수 중앙값이 4 → 3으로, 최근 12개월 논문만 보면 **1**입니다.
+> 최신 논문이 실제로 덜 인용됐기 때문이지만, 그 논문들이 *좋은* 논문인지는
+> 이 숫자로 알 수 없습니다. 정답 집합이 붙기 전까지 이 표는 방향 지표입니다.
+
+### P2 구현 중 잡은 문제 3가지
+
+전부 "무음 폐기 금지" 원칙이 잡아낸 것들입니다. stats 경고가 없었으면 조용히 넘어갔습니다.
+
+1. **랭킹 윈도우가 후보를 굶기고 있었습니다** — facet을 켜니 후보가 48,214편인데
+   S6·S7이 상위 3,000편만 보고 있었습니다(윈도우가 단일 쿼리 기준으로 잡혀 있었음).
+   `rank_window` / `title_window` 를 설정 가능하게 하고 기본을 전량으로 바꿨습니다.
+2. **`provenance_of` 가 호출마다 집합을 재구성했습니다** — 후보 48,000편 × 원본 72,000개에서
+   **315초**. 집합을 호출부에서 한 번만 만들도록 계약을 바꿔 **1.4초**가 됐습니다.
+3. **`get_papers` 의 `IN (?,?,...)` 이 id 수천 개에서 급격히 느려집니다** — 3,000개에 19.7초.
+   pyarrow 테이블 조인으로 바꿔 5,000개에 **0.32초**.
+
+### MMR 풀은 일부러 묶습니다
+
+`mmr_pool` 기본값은 `max(n_papers × 2, 3000)` 입니다. **풀이 커지면 다양성이 관련성을
+압도합니다** — 관련성을 풀 안에서 min-max 정규화하므로, 48,214편을 넣으면 대부분의
+relevance가 0 근처가 되고 λ가 의도한 균형이 깨집니다. 실측: 풀 3,000 → 12개월 45.8%,
+풀 48,214 → **18.3%**. 잘라낸 건수는 `stats.warnings` 에 남습니다.
 
 ## P3 — 어댑터 · CLI
 
@@ -153,9 +193,9 @@ facet 없이, 단일 쿼리로 dense+BM25+RRF+dedup까지. **여기까지가 "�
 
 | # | 작업 | 산출물 | 검증 |
 |---|---|---|---|
-| 3.1 | `adapters/autosurvey.py` | 드롭인 `database` 대체 | AutoSurvey 스모크 1편 생성 |
-| 3.2 | `adapters/surveyforge.py` (`filter`·`rerank` 인자 호환) | 드롭인 RAG 대체 | SurveyForge 스모크 1편 생성 |
-| 3.3 | `cli.py` — 토픽 → JSON 덤프 | CLI | 토픽 3개 배치 실행 |
+| 3.1 | `adapters/autosurvey.py` | 드롭인 `database` 대체 | 🟡 시그니처·반환형 검증 완료. **서베이 생성 스모크는 승인 대기** |
+| 3.2 | `adapters/surveyforge.py` (`filter`·`rerank` 인자 호환) | 드롭인 RAG 대체 | 🟡 `filter` 번역·`rerank` 대체 검증 완료. **스모크는 승인 대기** |
+| 3.3 | `cli.py` — 토픽 → JSON 덤프 | CLI | ✅ **완료** — `--ablate` 로 설정별 비교표까지 |
 
 > 서베이 생성은 편당 실비가 듭니다($0.3~2). 스모크는 사용자 승인 후에만 돌립니다.
 
@@ -165,14 +205,28 @@ facet 없이, 단일 쿼리로 dense+BM25+RRF+dedup까지. **여기까지가 "�
 
 | # | 작업 | 내용 |
 |---|---|---|
-| 4.1 | stats 리포트 | 단계별 in/out, 폐기 건수와 사유, 소요 시간 |
-| 4.2 | 최신성 지표 | 최근 6/12/24개월 논문 비율, 결과의 날짜 분포 히스토그램 |
-| 4.3 | 커버리지 지표 | facet별 논문 수, 미충족 facet 목록 |
-| 4.4 | 베이스라인 대조 | 같은 토픽에서 AutoSurvey·SurveyForge 원본 검색 결과와의 교집합/신규 유입 |
-| 4.5 | 회귀 고정 | 토픽 3~5개의 결과를 스냅샷으로 저장, 변경 시 diff |
+| 4.1 | stats 리포트 | ✅ `diagnostics.stage_report` |
+| 4.2 | 최신성 지표 | ✅ `freshness_report` — 비율 + 연도별 히스토그램 + 최근 논문 인용 중앙값 |
+| 4.3 | 커버리지 지표 | ✅ `coverage_report` — facet 중첩을 반영한 기대치 |
+| 4.4 | 베이스라인 대조 | ✅ `compare` — base_id 기준 교집합/Jaccard/신규 유입 |
+| 4.5 | 회귀 고정 | ✅ `snapshot` / `diff_snapshot` |
 
 **4.4가 특히 중요합니다** — "우리 검색이 원본이 못 찾던 무엇을 찾는가"를 논문 없이 정량화하는
-유일한 방법입니다.
+유일한 방법입니다. 실측 결과:
+
+```
+dense-only(베이스라인) (1,500편)  vs  survey-search(all-on) (1,500편)
+  교집합 471  |  Jaccard 0.186
+  all-on 만: 1,029편   베이스라인 만: 1,029편
+  최근 12개월: 35.5% -> 45.8%
+  인용수 중앙값: 4 -> 3
+```
+
+연도별 분포(all-on)는 2025년 491편 · 2026년 458편으로, 최근 2년이 전체의 63%입니다.
+
+> `coverage_report` 의 기대치는 `n_papers / n_facets` 가 **아닙니다.** facet 들은 서로
+> 겹칩니다(실측: 논문당 평균 7.9개 facet). 논문 수를 분모로 잡으면 기대치가 실제보다
+> 훨씬 작아져 '미달' 판정이 발동하지 않습니다. 총 소속 수를 facet 수로 나눈 값을 씁니다.
 
 ## P5 — 후속 (별도 판단 후 착수)
 
@@ -189,9 +243,12 @@ facet 없이, 단일 쿼리로 dense+BM25+RRF+dedup까지. **여기까지가 "�
 
 ## 지금 당장의 다음 한 걸음
 
-**P2.3 (freshness 랭킹)**. P1 실측에서 BM25가 최신성을 1.1%p밖에 못 올렸으므로,
-이 프로젝트의 가설은 S6에서 판가름납니다. facet(P2.1)보다 먼저 하는 것을 권합니다 —
-LLM 호출이 없어 결정적이고, 효과를 단독으로 잴 수 있기 때문입니다.
+**P3 스모크 — 서베이 생성 1편** (사용자 승인 필요, 편당 $0.3~2). 어댑터는 시그니처와
+반환형까지 검증했지만, 호스트 에이전트가 실제로 끝까지 도는지는 돌려봐야 압니다.
+그 전까지 P3는 🟡입니다.
+
+돈이 안 드는 것 중에서는 **P0.6 잔여**(`date` 가 v1 게시일인지 최신본 갱신일인지)가
+남아 있습니다. recency 가중의 기준이라 확인해 두는 게 좋습니다.
 
 ### 환경 재현
 
@@ -200,19 +257,33 @@ cd /data2/chanjoong/survey-agent/survey-search
 virtualenv -p python3.10 .venv                     # python3 -m venv 는 ensurepip 없어서 실패
 .venv/bin/pip install -e .
 .venv/bin/pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+cp .env.example .env && chmod 600 .env             # OPENROUTER_API_KEY 채우기
 .venv/bin/python -m survey_search.index.build_duckdb    # 90초, 1.1GB
-.venv/bin/python -m pytest tests/ -q                    # 32 passed
+.venv/bin/python -m pytest tests/ -q                    # 101 passed
 ```
 
-### 검색 돌려보기
+### 돌려보기
+
+```bash
+# 단일 토픽, 전 단계 켜기
+.venv/bin/python -m survey_search.cli --topic "Retrieval-Augmented Generation for LLMs" --all
+
+# 설정별 비교표 (P4.4) — 백엔드를 재사용하므로 인덱스를 한 번만 읽습니다
+.venv/bin/python -m survey_search.cli --topic "..." --ablate --out results/
+```
 
 ```python
+from survey_search.core.facets import load_dotenv; load_dotenv(".env")
 from survey_search.backends.faiss_duckdb import FaissDuckDBBackend
 from survey_search.search import search_topic
 from survey_search.types import SearchConfig
+from survey_search.metrics.diagnostics import compare, freshness_report, coverage_report
 
 be = FaissDuckDBBackend()          # 첫 검색은 cold 로 12초, 이후 0.1초
-r = search_topic("Retrieval-Augmented Generation for Large Language Models",
-                 backend=be, config=SearchConfig(n_papers=1500))
-print(r.stats.report())
+base = search_topic(T, backend=be, config=SearchConfig(lexical=False))
+ours = search_topic(T, backend=be, config=SearchConfig(facets=True, freshness=True,
+                                                       diversity=True, mmr_lambda=0.3))
+print(compare(base, ours).render())
+print(freshness_report(ours).render())
+print(coverage_report(ours).render())
 ```

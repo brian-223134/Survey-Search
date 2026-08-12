@@ -50,17 +50,21 @@ def rrf(
     return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
-def provenance_of(
-    paper_id: str, sources: dict[str, Iterable[Hit] | Iterable[str]]
-) -> tuple[str, ...]:
+def as_id_set(items: Iterable[Hit] | Iterable[str]) -> set[str]:
+    """`(id, score)` 목록이든 id 목록이든 id 집합으로."""
+    if isinstance(items, set):
+        return items
+    return {(x[0] if isinstance(x, tuple) else x) for x in items}
+
+
+def provenance_of(paper_id: str, sources: dict[str, set[str]]) -> tuple[str, ...]:
     """어느 경로로 들어온 논문인지 — {"dense", "bm25", ...}.
 
     `stats` 만으로는 "BM25가 몇 편 새로 데려왔나"를 못 셉니다. 논문 단위로 남겨야
     "dense 가 못 잡은 걸 BM25 가 잡았다"는 주장을 논문 목록으로 보일 수 있습니다.
+
+    **`sources` 의 값은 미리 만들어 둔 집합이어야 합니다.** 호출당 집합을 새로
+    만들면 후보 48,000편 × 원본 72,000개에서 5분이 걸립니다(실측). 집합 구성은
+    호출부에서 한 번만 하세요 — `as_id_set()` 이 그 용도입니다.
     """
-    out = []
-    for label, lst in sources.items():
-        ids = {(x[0] if isinstance(x, tuple) else x) for x in lst}
-        if paper_id in ids:
-            out.append(label)
-    return tuple(out)
+    return tuple(label for label, ids in sources.items() if paper_id in ids)

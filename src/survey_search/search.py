@@ -17,7 +17,7 @@ from datetime import date as _date
 
 from survey_search.backends.base import Backend
 from survey_search.core.dedup import dedup
-from survey_search.core.fuse import provenance_of, rrf
+from survey_search.core.fuse import as_id_set, provenance_of, rrf
 from survey_search.types import Facet, Paper, SearchConfig, SearchResult, SearchStats, StageStat
 
 log = logging.getLogger(__name__)
@@ -40,12 +40,28 @@ def search_topic(
     t_all = time.perf_counter()
 
     # --- S1 facet 분해 ------------------------------------------------------
-    # P2 에서 구현합니다. 끈 상태의 기본 동작은 "토픽 문자열이 유일한 쿼리".
     if cfg.facets:
-        raise NotImplementedError("S1 facet 분해는 P2.1 — 아직 구현되지 않았습니다")
-    queries = [topic]
-    facet_names = {topic: "(topic)"}
-    stats.add(StageStat("S1 facets", 1, 1, skipped=True, note="disabled -> 토픽 1쿼리"))
+        from survey_search.core.facets import decompose
+
+        t = time.perf_counter()
+        facet_list, fstats = decompose(topic, config=cfg.facet_config)
+        stats.add(StageStat("S1 facets", 1, fstats.n_facets, elapsed_s=_elapsed(t),
+                            note=f"source={fstats.source} model={fstats.model} "
+                                 f"queries={fstats.n_queries} llm_calls={fstats.llm_calls}"))
+        for w in fstats.warnings:
+            stats.warn(w)
+    else:
+        facet_list = [Facet(name="(topic)", queries=(topic,))]
+        stats.add(StageStat("S1 facets", 1, 1, skipped=True, note="disabled -> 토픽 1쿼리"))
+
+    # 쿼리를 평평하게 펴되, 어느 facet 소속인지 유지합니다 — facet 쿼터(S7)가
+    # 걸리려면 이 정보가 끝까지 살아 있어야 합니다.
+    queries: list[str] = []
+    query_facet: list[str] = []
+    for f in facet_list:
+        for q in f.queries:
+            queries.append(q)
+            query_facet.append(f.name)
     stats.n_queries = len(queries)
 
     # --- 사전 필터 (날짜·카테고리) --------------------------------------------
@@ -80,12 +96,26 @@ def search_topic(
         lex_lists = [[] for _ in queries]
         stats.add(StageStat("S3 lexical", len(queries), 0, skipped=True, note="disabled"))
 
-    # --- S4 RRF -------------------------------------------------------------
+    # --- S4 RRF (2단) --------------------------------------------------------
+    # ① facet 내부에서 dense+BM25 융합 → ② facet 간 융합.
+    # 나누는 이유는 facet 소속 정보를 살려 S7 의 facet 쿼터를 걸기 위해서입니다.
+    # 한 번에 다 섞으면 쿼리를 많이 가진 facet 이 결과를 지배하기도 합니다.
     t = time.perf_counter()
-    all_lists = [l for l in dense_lists if l] + [l for l in lex_lists if l]
-    fused = rrf(all_lists, k=cfg.rrf_k)
-    stats.add(StageStat("S4 rrf", sum(len(l) for l in all_lists), len(fused),
-                        elapsed_s=_elapsed(t), note=f"k={cfg.rrf_k}, {len(all_lists)} lists"))
+    per_facet: dict[str, list[tuple[str, float]]] = {}
+    for i, fname in enumerate(query_facet):
+        lists = [l for l in (dense_lists[i], lex_lists[i]) if l]
+        if not lists:
+            continue
+        inner = rrf(lists, k=cfg.rrf_k)
+        prev = per_facet.get(fname)
+        per_facet[fname] = rrf([prev, inner], k=cfg.rrf_k) if prev else inner
+
+    facet_ids = {name: [pid for pid, _ in lst] for name, lst in per_facet.items()}
+    fused = rrf(list(per_facet.values()), k=cfg.rrf_k)
+    n_in = sum(len(l) for l in dense_lists) + sum(len(l) for l in lex_lists)
+    stats.add(StageStat("S4 rrf", n_in, len(fused), elapsed_s=_elapsed(t),
+                        note=f"k={cfg.rrf_k}, 2단 ({len(queries)} 쿼리 -> "
+                             f"{len(per_facet)} facet -> 1)"))
 
     # 날짜·카테고리 필터를 융합 뒤에 적용합니다 — 그래야 "필터가 몇 편 버렸나"를
     # 검색 품질과 분리해서 셀 수 있습니다.
@@ -99,7 +129,7 @@ def search_topic(
     t = time.perf_counter()
     # 제목 병합을 하려면 제목이 필요합니다. 후보 전체를 조회하면 비싸므로
     # 최종 목록의 3배까지만 가져와 병합하고, 그 사실을 stats 에 남깁니다.
-    title_window = min(len(fused), max(cfg.n_papers * 3, 1000))
+    title_window = len(fused) if cfg.title_window is None else min(len(fused), cfg.title_window)
     head = fused[:title_window]
     head_papers = backend.get_papers([pid for pid, _ in head])
     titles = {p.paper_id: p.title for p in head_papers}
@@ -125,7 +155,7 @@ def search_topic(
     # freshness 는 인용수·날짜를 봐야 하므로, 컷 전에 후보 메타를 가져옵니다.
     # 후보 전체가 아니라 최종의 2배까지만 — 그 이하는 어차피 컷됩니다.
     t = time.perf_counter()
-    rank_window = min(len(deduped), max(cfg.n_papers * 2, 2000))
+    rank_window = len(deduped) if cfg.rank_window is None else min(len(deduped), cfg.rank_window)
     window = deduped[:rank_window]
     score_of = dict(window)
     fetched = backend.get_papers([pid for pid, _ in window])
@@ -134,8 +164,17 @@ def search_topic(
     if len(deduped) > rank_window:
         stats.warn(f"{len(deduped) - rank_window:,}편은 랭킹 대상에서 제외됨 (윈도우 {rank_window:,})")
 
-    dense_ids = {pid for l in dense_lists for pid, _ in l}
-    lex_ids = {pid for l in lex_lists for pid, _ in l}
+    # 집합은 여기서 한 번만 만듭니다 — provenance_of 안에서 매번 만들면
+    # 후보 48,000편 × 원본 72,000개에서 5분이 걸립니다.
+    dense_ids = as_id_set([h for l in dense_lists for h in l])
+    lex_ids = as_id_set([h for l in lex_lists for h in l])
+
+    # 논문 → 그 논문을 끌어올린 facet 들. S7 의 facet 쿼터가 이걸 봅니다.
+    facet_of: dict[str, list[str]] = {}
+    for fname, ids in facet_ids.items():
+        for pid in ids:
+            facet_of.setdefault(pid, []).append(fname)
+
     candidates = [
         Paper(
             paper_id=p.paper_id,
@@ -146,7 +185,7 @@ def search_topic(
             categories=p.categories,
             citation_count=p.citation_count,
             score=score_of.get(p.paper_id, 0.0),
-            facets=(facet_names.get(topic, "(topic)"),),
+            facets=tuple(facet_of.get(p.paper_id, ("(none)",))),
             provenance=provenance_of(p.paper_id, {"dense": dense_ids, "bm25": lex_ids}),
         )
         for p in fetched
@@ -179,25 +218,36 @@ def search_topic(
         from survey_search.core.diversity import diversify
 
         t = time.perf_counter()
+        # MMR 은 풀이 커질수록 다양성 쪽으로 쏠립니다(관련성을 풀 안에서 정규화하므로).
+        # 그래서 S6 과 달리 풀을 묶습니다. 잘라낸 건수는 아래 stats 에 남습니다.
+        pool_n = cfg.mmr_pool if cfg.mmr_pool is not None else max(cfg.n_papers * 2, 3000)
+        pool = candidates[:pool_n]
+
         vectors = None
         getter = getattr(backend, "get_vectors", None)
         if getter is None:
             stats.warn("백엔드에 get_vectors 가 없어 MMR 을 건너뜁니다 (facet 쿼터만 적용)")
         else:
-            vectors = getter([p.paper_id for p in candidates], cfg.dense_field)
+            vectors = getter([p.paper_id for p in pool], cfg.dense_field)
             if vectors is None:
                 stats.warn("저장 벡터를 못 구해 MMR 을 건너뜁니다 (facet 쿼터만 적용)")
 
         selected, dstats = diversify(
-            candidates, n=cfg.n_papers, vectors=vectors,
+            pool, n=cfg.n_papers, vectors=vectors,
             lambda_=cfg.mmr_lambda, min_per_facet=cfg.min_per_facet,
         )
-        stats.add(StageStat("S7 diversity", len(candidates), len(selected),
-                            dropped=len(candidates) - len(selected),
+        stats.add(StageStat("S7 diversity", len(pool), len(selected),
+                            dropped=len(pool) - len(selected),
                             reason=f"n_papers={cfg.n_papers}",
                             elapsed_s=_elapsed(t),
-                            note=f"mmr={dstats.mmr_applied} facets={dstats.n_facets} "
+                            note=f"pool={len(pool):,}/{len(candidates):,} "
+                                 f"mmr={dstats.mmr_applied} facets={dstats.n_facets} "
                                  f"quota={dstats.facet_quota_applied} | {dstats.note}"))
+        if len(candidates) > len(pool):
+            stats.warn(
+                f"MMR 풀을 {len(pool):,}편으로 제한 — {len(candidates) - len(pool):,}편은 "
+                f"S7 대상에서 제외 (풀이 커지면 다양성이 관련성을 압도합니다)"
+            )
         papers = tuple(selected)
     else:
         stats.add(StageStat("S7 diversity", len(candidates), len(candidates), skipped=True,
@@ -213,9 +263,21 @@ def search_topic(
     stats.n_final = len(papers)
     stats.total_s = _elapsed(t_all)
 
-    return SearchResult(topic=topic, papers=papers, facets=(Facet(name="(topic)",
-                        queries=tuple(queries), paper_ids=tuple(p.paper_id for p in papers)),),
-                        stats=stats)
+    # facet 별 최종 기여를 채웁니다 (P4.3 커버리지 지표의 입력).
+    final_ids = {p.paper_id for p in papers}
+    out_facets = tuple(
+        Facet(
+            name=f.name,
+            queries=f.queries,
+            paper_ids=tuple(pid for pid in facet_ids.get(f.name, []) if pid in final_ids),
+        )
+        for f in facet_list
+    )
+    empty = [f.name for f in out_facets if not f.paper_ids]
+    if empty:
+        stats.warn(f"최종 목록에 논문이 하나도 없는 facet {len(empty)}개: {empty[:5]}")
+
+    return SearchResult(topic=topic, papers=papers, facets=out_facets, stats=stats)
 
 
 def _fill_provenance(stats: SearchStats, papers: tuple[Paper, ...]) -> None:
