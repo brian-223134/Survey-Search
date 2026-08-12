@@ -7,7 +7,7 @@ AutoSurvey · SurveyForge · SurveyX 등 여러 서베이 에이전트가 공유
 topic: str  →  ranked · deduped · facet-grouped papers
 ```
 
-**최종 갱신**: 2026-08-12 · 테스트 124개 통과 · 사용법은 [`../SURVEY-SEARCH.md`](../SURVEY-SEARCH.md)
+**최종 갱신**: 2026-08-12 · 테스트 124개 통과
 
 ---
 
@@ -29,7 +29,7 @@ topic: str  →  ranked · deduped · facet-grouped papers
 여기서 두 가지 문제가 생깁니다.
 
 **① 데이터 신선도** — 배포본 DB의 컷오프가 2024-04(AutoSurvey) / 2024-09(SurveyForge)였습니다.
-2026-08 스냅샷으로 최신화하는 작업은 이미 끝났습니다(각 레포 `HANDOFF.md`).
+2026-08 스냅샷으로 최신화하는 작업은 이미 끝났습니다.
 
 **② 랭킹이 최신 논문에 구조적으로 불리함** — DB만 최신화해서는 해결되지 않습니다.
 SurveyForge의 `sort_by_citation_period`는 시간창 안에서 **인용수로 정렬**합니다. 최근
@@ -94,7 +94,7 @@ topic
 문서 초안 단계에서는 "SurGE 벤치마크 구현이 미공개라 정량 평가 보류"로 적어 두었는데,
 **직접 확인하니 그 전제가 틀렸습니다.**
 
-`../SurGE/data/surveys.json` 에 GT 서베이 205편이 있고, 각각 `survey_title`(토픽)과
+[SurGE](https://github.com/oneal2000/SurGE) 의 `data/surveys.json` 에 GT 서베이 205편이 있고, 각각 `survey_title`(토픽)과
 `all_cites`(그 서베이가 실제로 인용한 논문 목록)를 가집니다. **서베이가 인용한 논문
 집합이 곧 그 토픽의 정답입니다.** README 가 언급하는 `queries.json` 은 배포본에 없지만
 없어도 됩니다.
@@ -195,6 +195,9 @@ S2ORC 본문 + verl RL 스택이고, 우리는 FAISS + gte + arXiv 초록 + 규�
 
 ## 10. 참고한 레포
 
-- [`../SimScholarSearch`](../SimScholarSearch) — 이 프로젝트의 모태. 위 표 참조
-- [`../AutoSurvey`](../AutoSurvey), [`../SurveyForge`](../SurveyForge) — 1차 소비자
-- [`../SurGE`](../SurGE) — 평가 대상 (SIGIR 2026). GT 서베이 205편의 인용 목록이 정답 집합
+| 레포 | 이 프로젝트와의 관계 |
+|---|---|
+| [SimScholarSearch](https://github.com/trillion-labs/SimScholarSearch) | 이 프로젝트의 모태. 가져온 것과 안 가져온 것은 §9 |
+| [AutoSurvey](https://github.com/AutoSurveys/AutoSurvey) | 1차 소비자. `database` 드롭인 어댑터 제공 |
+| [SurveyForge](https://github.com/InternScience/SurveyForge) | 1차 소비자. `retrieve_id` 드롭인 어댑터 제공. 1차 인덱스도 여기서 재사용 |
+| [SurGE](https://github.com/oneal2000/SurGE) | 평가 대상 (SIGIR 2026). GT 서베이 205편의 인용 목록이 정답 집합 |

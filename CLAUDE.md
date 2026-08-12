@@ -54,5 +54,6 @@
 ../AutoSurvey/database_2026-08/         2차 백엔드 (nomic 768d)
 ../SurveyForge/, ../AutoSurvey/         1차 소비자. 각 HANDOFF.md에 DB 최신화 경위
 ../SimScholarSearch/                    툴 인터페이스·paper_set 채점기 참고용
-../SurGE/                               후속 평가 대상 (구현 코드 미공개)
+../SurGE/                               평가 대상. data/surveys.json 의 205편 ×
+                                        all_cites 가 정답 집합 (queries.json 은 없어도 됨)
 ```

@@ -238,12 +238,18 @@ class FaissDuckDBBackend:
         categories: tuple[str, ...] | None = None,
     ) -> set[str] | None:
         """조건이 하나도 없으면 None(=제한 없음). 빈 집합과 뜻이 다릅니다."""
+        # **갱신일(`date`)이 아니라 제출일 기준입니다.** "시점 T 에 존재하던 논문"은
+        # T 이전에 제출된 논문이지, T 이전에 마지막 개정된 논문이 아닙니다. `date` 로
+        # 거르면 2019년 논문이 2024년에 개정됐다는 이유로 2020년 시점 검색에서
+        # 탈락합니다. 실측: SurGE 정답 기준 탈락률 7.07% -> 6.75%.
+        # 구식 id(992편)는 submitted_date 가 없어 date 로 폴백합니다.
+        age = "COALESCE(submitted_date, date)"
         clauses, params = [], []
         if date_min:
-            clauses.append("date >= CAST(? AS DATE)")
+            clauses.append(f"{age} >= CAST(? AS DATE)")
             params.append(date_min)
         if date_max:
-            clauses.append("date <= CAST(? AS DATE)")
+            clauses.append(f"{age} <= CAST(? AS DATE)")
             params.append(date_max)
         if categories:
             clauses.append(
