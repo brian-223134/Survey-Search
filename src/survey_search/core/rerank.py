@@ -20,6 +20,7 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 
 from survey_search.types import Paper
 
@@ -28,9 +29,32 @@ log = logging.getLogger(__name__)
 DEFAULT_MODEL = "BAAI/bge-reranker-v2-m3"
 
 
+class QueryMode(str, Enum):
+    """cross-encoder 에 무엇을 쿼리로 줄 것인가. **이 선택이 결과를 지배합니다.**
+
+    - `TOPIC` — 토픽 문자열 하나. 구현은 단순하지만 실측에서 **해로웠습니다**:
+      "이 논문이 이 *주제에 관한* 것인가"를 묻게 되어 다른 서베이·개론이 올라오고,
+      정작 서베이가 인용하는 구체적 방법·데이터셋 논문이 밀려납니다
+      (HotpotQA 7위 → 940위, nDCG −34%)
+    - `FACET` — 그 논문을 **가장 높게 본 facet 의 쿼리**. 쌍 개수는 그대로이면서
+      쿼리가 구체적이 됩니다("HotpotQA multi-hop retrieval")
+    - `FACET_MAX` — 상위 `facet_max_n` 개 facet 쿼리로 각각 점수를 내고 최댓값.
+      더 정확할 수 있지만 쌍 개수가 그만큼 늘어납니다
+    """
+
+    TOPIC = "topic"
+    FACET = "facet"
+    FACET_MAX = "facet_max"
+
+
 @dataclass(frozen=True)
 class RerankConfig:
     model: str = DEFAULT_MODEL
+    #: 쿼리 구성 방식. 기본이 FACET 인 이유는 위 docstring 참조 —
+    #: TOPIC 은 실측에서 기준선보다 나빴습니다.
+    query_mode: QueryMode = QueryMode.FACET
+    #: FACET_MAX 에서 논문당 최대 몇 개 facet 쿼리를 볼지
+    facet_max_n: int = 3
     #: 상위 몇 편을 재랭킹할지. 나머지는 원래 순서 뒤에 그대로 붙습니다.
     #: **`n_papers` 보다 커야 의미가 있습니다.** 작으면 최종 집합이 안 바뀌고 순서만
     #: 바뀌어서, 재랭킹을 켠 실험과 끈 실험이 recall 로 구분되지 않습니다.
@@ -55,6 +79,8 @@ class RerankStats:
     n_in: int = 0
     n_scored: int = 0
     n_untouched: int = 0        # top_n 밖이라 원래 순서를 유지한 수
+    n_pairs: int = 0            # 실제 forward 횟수 (FACET_MAX 면 논문 수보다 큽니다)
+    n_topic_fallback: int = 0   # facet 쿼리를 못 찾아 토픽으로 물러선 논문 수
     elapsed_s: float = 0.0
     device: str = ""
     model: str = ""
@@ -109,10 +135,49 @@ class CrossEncoderReranker:
             self._model, self._device = m, device
         return self._model
 
+    def _build_pairs(
+        self, topic: str, head: Sequence[Paper], facet_queries: dict[str, str] | None
+    ) -> tuple[list[tuple[str, str]], list[list[int]], int]:
+        """(쌍 목록, 논문별 쌍 인덱스, facet 쿼리를 못 찾아 토픽으로 물러선 수).
+
+        논문 하나가 여러 쌍을 가질 수 있으므로(FACET_MAX) 인덱스를 따로 돌려줍니다.
+        """
+        cfg = self.config
+        pairs: list[tuple[str, str]] = []
+        owner: list[list[int]] = []
+        fallbacks = 0
+
+        for p in head:
+            doc = _doc_text(p, cfg.abstract_chars)
+            queries: list[str] = []
+            if cfg.query_mode is not QueryMode.TOPIC and facet_queries:
+                # Paper.facets 는 순위 순입니다 — 첫 원소가 그 논문을 가장 높게 본 facet.
+                take = 1 if cfg.query_mode is QueryMode.FACET else cfg.facet_max_n
+                queries = [facet_queries[f] for f in p.facets[:take] if f in facet_queries]
+            if not queries:
+                # facet 이 없거나(S1 꺼짐) 매핑에 없으면 토픽으로 물러섭니다.
+                # 조용히 건너뛰면 그 논문만 점수가 없어 순서가 망가집니다.
+                queries = [topic]
+                fallbacks += 1
+            idx = []
+            for q in queries:
+                idx.append(len(pairs))
+                pairs.append((q, doc))
+            owner.append(idx)
+        return pairs, owner, fallbacks
+
     def rerank(
-        self, query: str, papers: Sequence[Paper]
+        self,
+        query: str,
+        papers: Sequence[Paper],
+        facet_queries: dict[str, str] | None = None,
     ) -> tuple[list[Paper], RerankStats]:
-        """`papers` 를 쿼리 기준으로 다시 세웁니다. 상위 `top_n` 만 대상입니다."""
+        """`papers` 를 다시 세웁니다. 상위 `top_n` 만 대상입니다.
+
+        `facet_queries` 는 facet 이름 → 대표 쿼리. `query_mode` 가 TOPIC 이 아니면
+        논문마다 **자기를 끌어올린 facet 의 쿼리**로 점수를 냅니다. 넘기지 않으면
+        토픽으로 물러서고 그 건수가 `n_topic_fallback` 에 남습니다.
+        """
         cfg = self.config
         stats = RerankStats(n_in=len(papers), model=cfg.model)
         t0 = time.perf_counter()
@@ -125,11 +190,13 @@ class CrossEncoderReranker:
         tail = list(papers[cfg.top_n :])
         stats.n_untouched = len(tail)
 
+        pairs, owner, fallbacks = self._build_pairs(query, head, facet_queries)
+        stats.n_topic_fallback = fallbacks
+        stats.n_pairs = len(pairs)
+
         try:
             model = self.model
-            pairs = [(query, _doc_text(p, cfg.abstract_chars)) for p in head]
-            scores = model.predict(pairs, batch_size=cfg.batch_size,
-                                   show_progress_bar=False)
+            raw = model.predict(pairs, batch_size=cfg.batch_size, show_progress_bar=False)
         except Exception as e:  # noqa: BLE001 — 재랭킹 실패로 검색 전체를 죽이지 않습니다
             stats.errors.append(f"{type(e).__name__}: {e}")
             stats.note = "재랭킹 실패 -> 원래 순서 유지"
@@ -137,13 +204,17 @@ class CrossEncoderReranker:
             log.warning("cross-encoder 재랭킹 실패, 원래 순서 유지: %s", e)
             return list(papers), stats
 
+        # 논문당 여러 쌍이면 최댓값 — "어느 하위 주제로 봐도 관련 없음" 이 아니라
+        # "어느 하위 주제로는 매우 관련 있음" 을 잡아야 합니다.
+        scores = [max(float(raw[i]) for i in idx) for idx in owner]
+
         stats.applied = True
         stats.n_scored = len(head)
         stats.device = self._device or ""
 
         # cross 점수는 스케일이 제각각(로짓)이라 원래 점수와 직접 못 섞습니다.
         # 순위 기반으로 정규화한 뒤 섞습니다 — 파이프라인의 다른 곳과 같은 이유입니다.
-        order = sorted(range(len(head)), key=lambda i: -float(scores[i]))
+        order = sorted(range(len(head)), key=lambda i: -scores[i])
         cross_rank = {i: r for r, i in enumerate(order)}
         n = max(len(head) - 1, 1)
 
@@ -162,6 +233,7 @@ class CrossEncoderReranker:
         out.extend(tail)
 
         stats.elapsed_s = time.perf_counter() - t0
-        stats.note = (f"top_n={cfg.top_n} blend={cfg.blend} "
-                      f"scored={stats.n_scored} untouched={stats.n_untouched}")
+        stats.note = (f"mode={cfg.query_mode.value} top_n={cfg.top_n} blend={cfg.blend} "
+                      f"scored={stats.n_scored} pairs={stats.n_pairs} "
+                      f"fallback={stats.n_topic_fallback} untouched={stats.n_untouched}")
         return out, stats

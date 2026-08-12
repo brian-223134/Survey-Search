@@ -175,10 +175,16 @@ def search_topic(
     lex_ids = as_id_set([h for l in lex_lists for h in l])
 
     # 논문 → 그 논문을 끌어올린 facet 들. S7 의 facet 쿼터가 이걸 봅니다.
-    facet_of: dict[str, list[str]] = {}
+    # **순위 순으로 정렬합니다** — 첫 원소가 "그 논문을 가장 높게 본 facet" 이어야
+    # S8b 의 facet 쿼리 재랭킹이 대표 쿼리를 옳게 고릅니다. 삽입 순서로 두면
+    # facet 사전 순서라는 무의미한 기준으로 쿼리가 정해집니다.
+    facet_rank: dict[str, list[tuple[int, str]]] = {}
     for fname, ids in facet_ids.items():
-        for pid in ids:
-            facet_of.setdefault(pid, []).append(fname)
+        for rank, pid in enumerate(ids):
+            facet_rank.setdefault(pid, []).append((rank, fname))
+    facet_of = {
+        pid: [f for _, f in sorted(pairs)] for pid, pairs in facet_rank.items()
+    }
 
     candidates = [
         Paper(
@@ -288,7 +294,10 @@ def search_topic(
                 f"recall 을 올리려면 top_n 을 n_papers 보다 크게 잡으세요"
             )
 
-        candidates, rstats = reranker.rerank(topic, candidates)
+        # facet 이름 → 대표 쿼리. facet 은 쿼리를 1~3개 갖는데 첫 번째가 LLM 이
+        # 그 하위 주제를 가장 직접적으로 표현한 것입니다.
+        facet_queries = {f.name: f.queries[0] for f in facet_list if f.queries}
+        candidates, rstats = reranker.rerank(topic, candidates, facet_queries)
         stats.add(StageStat("S8b rerank", len(candidates), len(candidates),
                             skipped=not rstats.applied, elapsed_s=_elapsed(t),
                             note=f"{rstats.note} device={rstats.device}"))
