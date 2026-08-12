@@ -176,16 +176,37 @@ def search_topic(
 
     # --- S7 diversity -------------------------------------------------------
     if cfg.diversity:
-        raise NotImplementedError("S7 다양성은 P2.4 — 아직 구현되지 않았습니다")
-    stats.add(StageStat("S7 diversity", len(candidates), len(candidates), skipped=True,
-                        note="disabled -> 점수순 상위 N"))
+        from survey_search.core.diversity import diversify
 
-    # --- 최종 컷 ------------------------------------------------------------
-    if len(candidates) > cfg.n_papers:
-        stats.add(StageStat("cut", len(candidates), cfg.n_papers,
-                            dropped=len(candidates) - cfg.n_papers,
-                            reason=f"n_papers={cfg.n_papers}"))
-    papers = tuple(candidates[: cfg.n_papers])
+        t = time.perf_counter()
+        vectors = None
+        getter = getattr(backend, "get_vectors", None)
+        if getter is None:
+            stats.warn("백엔드에 get_vectors 가 없어 MMR 을 건너뜁니다 (facet 쿼터만 적용)")
+        else:
+            vectors = getter([p.paper_id for p in candidates], cfg.dense_field)
+            if vectors is None:
+                stats.warn("저장 벡터를 못 구해 MMR 을 건너뜁니다 (facet 쿼터만 적용)")
+
+        selected, dstats = diversify(
+            candidates, n=cfg.n_papers, vectors=vectors,
+            lambda_=cfg.mmr_lambda, min_per_facet=cfg.min_per_facet,
+        )
+        stats.add(StageStat("S7 diversity", len(candidates), len(selected),
+                            dropped=len(candidates) - len(selected),
+                            reason=f"n_papers={cfg.n_papers}",
+                            elapsed_s=_elapsed(t),
+                            note=f"mmr={dstats.mmr_applied} facets={dstats.n_facets} "
+                                 f"quota={dstats.facet_quota_applied} | {dstats.note}"))
+        papers = tuple(selected)
+    else:
+        stats.add(StageStat("S7 diversity", len(candidates), len(candidates), skipped=True,
+                            note="disabled -> 점수순 상위 N"))
+        if len(candidates) > cfg.n_papers:
+            stats.add(StageStat("cut", len(candidates), cfg.n_papers,
+                                dropped=len(candidates) - cfg.n_papers,
+                                reason=f"n_papers={cfg.n_papers}"))
+        papers = tuple(candidates[: cfg.n_papers])
 
     _fill_recency(stats, papers, today)
     _fill_provenance(stats, papers)

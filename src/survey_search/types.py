@@ -176,6 +176,11 @@ class SearchConfig:
     #: S6 설정. None 이면 기본값(alpha=beta=0.5, WEIGHT 모드)
     freshness_config: object | None = None
 
+    #: S7 — MMR 의 관련성/다양성 균형. 1.0 = 순수 관련성(= 끈 것과 같음), 0.0 = 순수 다양성
+    mmr_lambda: float = 0.7
+    #: S7 — facet 당 최소 배정. None 이면 n_papers // facet 수
+    min_per_facet: int | None = None
+
     date_min: str | None = None
     date_max: str | None = None
     categories: tuple[str, ...] | None = None

@@ -59,6 +59,8 @@ class FaissDuckDBBackend:
         self._indexes: dict[str, object] = {}
         self._index_to_id: dict[int, str] | None = None
         self._id_to_index: dict[str, int] | None = None
+        self._id_to_row: dict[int, int] | None = None
+        self._id_to_row_field: str | None = None
         self._lock = threading.Lock()
 
     # --- lazy 자원 -----------------------------------------------------------
@@ -210,6 +212,43 @@ class FaissDuckDBBackend:
             f"SELECT paper_id FROM papers WHERE {' AND '.join(clauses)}", params
         ).fetchall()
         return {str(r[0]) for r in rows}
+
+    def get_vectors(self, paper_ids: list[str], field: str = "title_abs") -> np.ndarray | None:
+        """저장된 문서 임베딩을 꺼냅니다 (S7 MMR 용). **재임베딩하지 않습니다.**
+
+        `faiss_id - 1` 을 행 번호로 쓰면 안 됩니다 — id_map 이 순열이라 441,842개가
+        어긋납니다(SETTING.md §6-A). 반드시 `build_id_to_row()` 를 거칩니다.
+
+        찾지 못한 id 가 하나라도 있으면 **None 을 돌려줍니다** — 일부만 채운 행렬은
+        MMR 에서 조용히 틀린 유사도를 만들기 때문입니다. 부분 성공보다 명시적 실패가 낫습니다.
+        """
+        if not paper_ids:
+            return None
+        import faiss
+
+        from survey_search.index.inspect_faiss import build_id_to_row
+
+        index = self._index(field)
+        id_to_index, _ = self._maps()
+
+        with self._lock:
+            if self._id_to_row is None or self._id_to_row_field != field:
+                self._id_to_row = build_id_to_row(index)
+                self._id_to_row_field = field
+
+        inner = faiss.downcast_index(index.index)
+        out = np.empty((len(paper_ids), index.d), dtype="float32")
+        for i, pid in enumerate(paper_ids):
+            fid = id_to_index.get(pid)
+            if fid is None:
+                log.warning("get_vectors: %s 의 faiss_id 를 못 찾음 -> None 반환", pid)
+                return None
+            row = self._id_to_row.get(int(fid))
+            if row is None:
+                log.warning("get_vectors: faiss_id %d 의 행 번호를 못 찾음 -> None 반환", fid)
+                return None
+            out[i] = inner.reconstruct(row)
+        return out
 
     def close(self) -> None:
         if self._con is not None:

@@ -263,5 +263,5 @@ db = SurveySearchDatabase(db_path, embedding_model)   # 기존 database()와 동
 |---|---|---|
 | 1 | 백엔드 간 코퍼스 통합 여부 | **하지 않음.** 백엔드별로 독립 유지하고 `base_id`로만 교차 참조. 통합은 재임베딩을 부르고, 그러면 베이스라인과의 통제 비교가 깨짐 |
 | 2 | 임베딩 모델 통일 | 1차는 **통일하지 않음** — 기존 인덱스 재사용이 목적. BGE-M3 재구축은 P5에서 별도 축으로 |
-| 3 | facet 분해에 쓸 LLM | 기존 레포가 쓰는 OpenRouter 키 재사용. 캐시가 있어 비용은 토픽당 1회 |
+| 3 | facet 분해에 쓸 LLM | **OpenRouter로 확정** (2026-08-12). 기존 레포의 키를 재사용합니다 — 환경변수 규약은 `OPENROUTER_API_KEY` · `OPENROUTER_BASE_URL` · `MODEL` (`../AutoSurvey/.env`, `../SurveyForge/.env`, `../SurGE/.env`에 존재). 캐시가 있어 비용은 토픽당 1회 |
 | 4 | 평가 | SurGE 코드 미공개 → 우선 **내부 진단 지표**(stats, 최신 논문 비율, facet 커버리지)로 개발. 정량 벤치마크는 후속 |
