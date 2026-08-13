@@ -130,6 +130,26 @@ def test_load_dotenv_missing_file_is_noop():
     assert load_dotenv("/nonexistent/.env") == 0
 
 
+def test_parse_survives_trailing_content_after_the_json():
+    """실측 실패: 모델이 객체를 낸 뒤 설명을 덧붙이면 json.loads 가 'Extra data' 로 터집니다.
+    이건 재시도 없이 곧장 fallback 이라 그 토픽의 facet 실험이 조용히 무효가 됩니다."""
+    body = '{"facets":[{"name":"A","queries":["q"]}]}'
+    for trailing in ("\n\nHope this helps!", '\n{"facets":[]}', "\n```", " \n\n주석"):
+        out = _parse_facets(body + trailing, cfg())
+        assert [f.name for f in out] == ["A"], trailing
+
+
+def test_parse_survives_prose_on_both_sides():
+    text = 'Here you go:\n{"facets":[{"name":"A","queries":["q"]}]}\nLet me know!'
+    assert _parse_facets(text, cfg())[0].name == "A"
+
+
+def test_parse_reports_which_text_failed():
+    """파싱 실패 사유에 원문이 있어야 어느 모델이 왜 깨졌는지 추적됩니다."""
+    with pytest.raises(ValueError, match="JSON 파싱 실패"):
+        _parse_facets('{"facets": [ broken', cfg())
+
+
 def test_parse_rejects_empty_content_instead_of_crashing():
     """OpenRouter 가 content=None 을 돌려주는 일이 실제로 있습니다.
     AttributeError 로 터지면 decompose 의 fallback 이 못 잡아 배치 전체가 죽습니다."""

@@ -148,12 +148,20 @@ def _parse_facets(text: str | None, cfg: FacetConfig) -> list[Facet]:
         t = re.sub(r"^```[a-zA-Z]*\n?", "", t)
         t = re.sub(r"\n?```$", "", t).strip()
     if not t.startswith("{"):
-        s, e = t.find("{"), t.rfind("}")
-        if s < 0 or e <= s:
+        s = t.find("{")
+        if s < 0:
             raise ValueError(f"JSON 을 찾을 수 없음: {text[:200]!r}")
-        t = t[s : e + 1]
+        t = t[s:]
 
-    data = json.loads(t)
+    # **뒤에 뭐가 붙어도 첫 객체만 읽습니다.** `json.loads` 는 문자열 전체가 JSON 하나여야
+    # 해서, 모델이 객체를 낸 뒤 설명을 덧붙이거나 객체를 하나 더 내면
+    # `Extra data: line 1 column 2928` 로 터집니다. 이건 재시도 대상이 아니라 곧장
+    # fallback 으로 가는 경로라, 그 토픽의 facet 실험이 조용히 무효가 됩니다.
+    # 실제로 170토픽 중 2개가 이걸로 날아갔습니다.
+    try:
+        data, _ = json.JSONDecoder().raw_decode(t)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON 파싱 실패({e}): {text[:200]!r}") from e
     out: list[Facet] = []
     for item in data.get("facets", []):
         name = str(item.get("name", "")).strip()
