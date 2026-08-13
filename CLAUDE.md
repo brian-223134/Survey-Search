@@ -37,6 +37,7 @@
 - **서베이 생성은 사용자 승인 후에만** — 편당 실비 $0.3~2. 검증·집계처럼 돈이 안 드는 구간은 알아서 진행
 - **형제 레포는 읽기 전용** — `../AutoSurvey`, `../SurveyForge`, `../SurveyForge_data`,
   `../SimScholarSearch`를 고치지 마세요. 통제 비교가 깨집니다
+- **GIT은 오직 Commit 까지만 진행** - Commit을 진행할 때, { docs, feat, modify ... }와 같이 message를 쓰기 (ex: docs: README에 실험 결과 추가)
 
 ## 작업 규칙
 
