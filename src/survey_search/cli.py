@@ -107,6 +107,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.all:
         args.facets = args.freshness = args.diversity = True
+        # `--all` 은 말 그대로 전부 켭니다 — **다양성 포함**. 그런데 다양성은 정답 기준으로
+        # 늘 손해였습니다(R@50 19.4% → 9.4%). 이름만 보고 "권장 설정"으로 오해하기 쉬워서
+        # 반드시 경고합니다. 권장은 `--facets --freshness` 입니다.
+        # 인자 없는 log.warning 은 %-치환을 안 하므로 %% 를 쓰면 그대로 찍힙니다.
+        log.warning(
+            "--all 은 다양성(MMR)까지 켭니다. 정답 기준으로는 손해였습니다 "
+            "(R@50 19.4% -> 9.4%). 권장 설정은 --facets --freshness 입니다"
+        )
 
     topics = (
         [args.topic]
