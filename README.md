@@ -494,12 +494,16 @@ python -m survey_search.eval.surge --checkpoint data/eval.ckpt.jsonl
 
 ### 결과 (토픽 **170개** = 정답 집합 전체, 평균 정답 72편, n_papers=1500)
 
+> 상세는 [`docs/ablation-170.md`](docs/ablation-170.md). 실험별 기록은
+> [`docs/`](docs/README.md) 에 항목별로 나눠 두었습니다.
+
 | 설정 | R@50 | R@100 | R@500 | R@1500 | nDCG |
 |---|---|---|---|---|---|
 | dense only | 15.4% | 21.5% | 36.3% | 38.7% | 0.200 |
 | + BM25 | 13.4% | 18.9% | 35.4% | 41.7% | 0.177 |
 | + freshness | 14.0% | 20.1% | 36.4% | 41.7% | 0.217 |
-| **+ facets** | **19.0%** | **25.5%** | **43.9%** | **56.9%** | **0.294** |
+| + facets | **19.0%** | **25.5%** | 43.9% | 56.9% | 0.294 |
+| **+ facets, BM25 끔 (권장)** | 18.6% | 25.4% | **44.4%** | **57.5%** | **0.299** |
 
 단계별 증분 (설정은 누적입니다):
 
@@ -836,6 +840,23 @@ SearchConfig(n_papers=1500, facets=True, freshness=True, lexical=False)   # 나�
 13.9초에서 **2.6초**로 줄어듭니다. facet 을 안 쓸 거라면 BM25 는 켜 두세요.
 코드는 남겨 둡니다 — 커버리지가 진짜 목적 함수인 다른 설정에서는 결론이 다를 수 있고,
 "무엇이 효과가 없었는가"도 이 프로젝트의 결과물이기 때문입니다.
+
+### 실험 기록
+
+실험·평가는 [`docs/`](docs/README.md) 에 항목별로 나눠 기록합니다 — 무엇을 물었고,
+어떻게 쟀고, 무엇이 나왔고, 그래서 무엇을 정했는지. **틀렸던 것도 지우지 않습니다.**
+
+| | |
+|---|---|
+| [ablation-170.md](docs/ablation-170.md) | **주 결과** — 각 단계의 기여 |
+| [evaluation-setup.md](docs/evaluation-setup.md) | 정답 집합·컷오프·지표 |
+| [ceiling-and-depth.md](docs/ceiling-and-depth.md) | 병목이 검색인가 랭킹인가 |
+| [bm25-in-facets.md](docs/bm25-in-facets.md) | BM25 는 facet 이 켜지면 하는 일이 없습니다 |
+| [diversity-mmr.md](docs/diversity-mmr.md) | 다양성은 항상 손해였습니다 |
+| [reranking.md](docs/reranking.md) | 재랭킹 3변형 전부 미달 |
+| [performance.md](docs/performance.md) | 검색 1회 227초 → 2.6초 |
+| [determinism.md](docs/determinism.md) | 오랫동안 결정적이 아니었습니다 |
+| [pitfalls.md](docs/pitfalls.md) | 함정 12가지 |
 
 내부 문서(`DESIGN.md` · `SETTING.md` · `TASKS.md` · `HANDOFF.md`)는 이 저장소에
 포함되지 않습니다(`.gitignore`). 설계 근거·환경 실측·인수인계가 거기 있습니다.
