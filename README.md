@@ -7,7 +7,7 @@ AutoSurvey · SurveyForge · SurveyX 등 여러 서베이 에이전트가 공유
 topic: str  →  ranked · deduped · facet-grouped papers
 ```
 
-**최종 갱신**: 2026-08-12 · 테스트 154개 통과
+**최종 갱신**: 2026-08-13 · 테스트 154개 통과
 
 ---
 
