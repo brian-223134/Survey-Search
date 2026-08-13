@@ -1,7 +1,7 @@
 .env
 .venv/
 
-# 공개 레포에 올리지 않는 내부 문서 (로컬에는 그대로 남아 있습니다)
+# 공개 레포에 올리지 않는 내부 문서
 SETTING.md
 TASKS.md
 DESIGN.md
@@ -11,3 +11,9 @@ __pycache__/
 *.pyc
 data/
 .pytest_cache/
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
