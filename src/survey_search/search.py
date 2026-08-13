@@ -158,7 +158,27 @@ def search_topic(
     rank_window = len(deduped) if cfg.rank_window is None else min(len(deduped), cfg.rank_window)
     window = deduped[:rank_window]
     score_of = dict(window)
-    fetched = backend.get_papers([pid for pid, _ in window])
+
+    # **S5 에서 이미 가져온 것은 다시 묻지 않습니다.** 두 창(`title_window`,
+    # `rank_window`)의 기본값이 둘 다 "전량"이라 같은 수만 편을 두 번 조회하고
+    # 있었습니다 — 검색 1회에서 meta 90초 + dedup 90초가 사실상 같은 일이었습니다.
+    # dedup 은 버전·제목이 겹치는 것을 지울 뿐 새 id 를 만들지 않으므로, 여기서
+    # 필요한 것은 S5 가 본 집합의 부분집합입니다. 모자란 것만 마저 가져옵니다.
+    #
+    # **순서를 반드시 보존해야 합니다.** freshness 를 끄면 이 순서가 곧 최종 랭킹입니다
+    # (RRF 순서가 fused -> deduped -> window -> fetched 로 흘러옵니다). 찾은 것을
+    # 뒤에 몰아 붙이면 기준선 실험의 랭킹이 통째로 바뀝니다.
+    have = {p.paper_id: p for p in head_papers}
+    need = [pid for pid, _ in window if pid not in have]
+    extra = {p.paper_id: p for p in backend.get_papers(need)} if need else {}
+    fetched = []
+    for pid, _ in window:
+        p = have.get(pid) or extra.pop(pid, None)
+        if p is not None:
+            fetched.append(p)
+    # 하이브리드 백엔드는 로컬에 없는 논문을 온라인에서 채워 **요청보다 많이** 줍니다.
+    # 그 몫은 window 에 없으니 위 루프가 못 담습니다 — 뒤에 붙여 살립니다.
+    fetched += list(extra.values())
     # 하이브리드 백엔드는 로컬에 없는 논문을 온라인에서 채우므로 **요청보다 많이**
     # 돌아올 수 있습니다. 그 경우는 결손이 아니라 보강입니다 — 구분해서 남깁니다.
     delta = len(fetched) - len(window)

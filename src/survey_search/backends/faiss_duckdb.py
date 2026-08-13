@@ -159,17 +159,35 @@ class FaissDuckDBBackend:
             out.append(hits)
         return out
 
+    #: BM25 점수를 정렬 전에 이 자리까지 반올림합니다. 아래 주석 참고.
+    BM25_SORT_PRECISION = 9
+
     def lexical_search(self, queries: list[str], top_k: int) -> list[list[Hit]]:
-        """DuckDB FTS BM25. `match_bm25` 는 매칭 안 되면 NULL 이라 걸러냅니다."""
+        """DuckDB FTS BM25. `match_bm25` 는 매칭 안 되면 NULL 이라 걸러냅니다.
+
+        **정렬에 반올림과 tie-break 를 겁니다 — 이게 없으면 검색이 비결정적입니다.**
+
+        실측: 같은 쿼리를 연속 두 번 던지면 상위 300편의 **집합과 점수는 같은데**
+        (최대차 8.9e-16 = 부동소수점 끝자리) **순서가 다릅니다.** DuckDB 가 병렬로
+        누적하면서 마지막 비트가 흔들리고, `ORDER BY score DESC` 에 동점 규칙이
+        없어 그 순서가 실행마다 갈립니다. top_k 경계에서는 순서가 아니라 **어느 논문이
+        들어오느냐**까지 바뀝니다 (실측: 2,000편 중 60등에서 다른 논문 유입).
+
+        그 결과 facet 을 켜면(쿼리 12~16개) 같은 토픽 재검색이 다른 결과를 냅니다.
+        `SET threads TO 1` 로도 없어지지만 그러면 BM25 가 느려집니다. 반올림 +
+        `paper_id` tie-break 는 공짜이고, 9자리는 BM25 점수의 의미 있는 정밀도를
+        한참 넘습니다(점수 차가 1e-9 인 두 논문은 실질적으로 동점입니다).
+        """
         out: list[list[Hit]] = []
         for q in queries:
             rows = self.con.execute(
-                """
+                f"""
                 SELECT paper_id, score FROM (
                     SELECT paper_id, fts_main_papers.match_bm25(paper_id, ?) AS score
                     FROM papers
                 ) WHERE score IS NOT NULL
-                ORDER BY score DESC LIMIT ?
+                ORDER BY round(score, {self.BM25_SORT_PRECISION}) DESC, paper_id
+                LIMIT ?
                 """,
                 [q, top_k],
             ).fetchall()
@@ -192,21 +210,49 @@ class FaissDuckDBBackend:
         # 않으면 스노우볼링이 통째로 0편을 내면서도 조용히 지나갑니다 (실제로 겪었습니다).
         from survey_search.core.dedup import strip_version
 
-        ids_tbl = pa.table({
+        # **조인 조건에 `OR` 를 쓰지 마세요.** `ON a = x OR b = y` 는 해시 조인을 못 쓰게
+        # 만들어 사실상 중첩 루프가 됩니다. 실측(같은 id 집합, 5만 건):
+        #
+        #     OR 조인 20.05s  /  등호만 0.23s  /  아래처럼 둘로 쪼개면 0.23s
+        #
+        # 1,000건에서는 0.48s 대 0.08s 라 눈에 안 띄지만 초선형이라 facet 을 켜서
+        # 후보가 수만 편이 되면 파이프라인 전체를 잡아먹습니다. 실제로 `meta` 단계가
+        # 검색 1회의 40% 를 쓰고 있었습니다.
+        #
+        # 이 함정은 두 수정이 겹쳐서 생겼습니다. 원래는 등호 조인이었고(그래서 주석의
+        # 0.1초가 맞았습니다), 나중에 스노우볼링의 버전 없는 id 를 받으려고 `OR` 를
+        # 덧붙이면서 최적화가 조용히 무효가 됐습니다. 성능 주석은 그대로 남아 있어
+        # 아무도 여기를 의심하지 않았습니다.
+        base_of = {p: strip_version(p) for p in paper_ids}
+        cols = ("p.paper_id, p.base_id, p.title, p.abstract, "
+                "CAST(p.date AS VARCHAR), CAST(p.submitted_date AS VARCHAR), "
+                "p.categories, p.citation_count")
+
+        self.con.register("wanted", pa.table({
             "want": pa.array(paper_ids, pa.string()),
-            "want_base": pa.array([strip_version(p) for p in paper_ids], pa.string()),
-        })
-        self.con.register("wanted", ids_tbl)
+            "want_base": pa.array(list(base_of.values()), pa.string()),
+        }))
         try:
             rows = self.con.execute(
-                """
-                SELECT w.want, p.paper_id, p.base_id, p.title, p.abstract,
-                       CAST(p.date AS VARCHAR), CAST(p.submitted_date AS VARCHAR),
-                       p.categories, p.citation_count
-                FROM wanted w JOIN papers p
-                  ON p.paper_id = w.want OR p.base_id = w.want_base
-                """
+                f"SELECT w.want, {cols} FROM wanted w JOIN papers p ON p.paper_id = w.want"
             ).fetchall()
+            found = {r[0] for r in rows}
+
+            # 정확히 못 맞춘 것만 base_id 로 한 번 더. 보통 극소수라 두 번째 조인은
+            # 거의 공짜입니다. 여기서도 등호만 씁니다.
+            missing = [p for p in paper_ids if p not in found]
+            if missing:
+                self.con.register("wanted_base", pa.table({
+                    "want": pa.array(missing, pa.string()),
+                    "want_base": pa.array([base_of[p] for p in missing], pa.string()),
+                }))
+                try:
+                    rows += self.con.execute(
+                        f"SELECT w.want, {cols} FROM wanted_base w JOIN papers p "
+                        "ON p.base_id = w.want_base"
+                    ).fetchall()
+                finally:
+                    self.con.unregister("wanted_base")
         finally:
             self.con.unregister("wanted")
 
