@@ -7,7 +7,7 @@ AutoSurvey · SurveyForge · SurveyX 등 여러 서베이 에이전트가 공유
 topic: str  →  ranked · deduped · facet-grouped papers
 ```
 
-**최종 갱신**: 2026-08-13 · 테스트 172개 통과
+**최종 갱신**: 2026-08-13 · 테스트 181개 통과
 
 ---
 
@@ -67,7 +67,8 @@ topic
 - **드롭인 어댑터** — 호스트 코드를 한 줄만 바꿔 끼울 수 있어야 "검색만 바꿨을 때의
   효과"를 통제 측정할 수 있습니다
 - **결정적 파이프라인** — LLM은 facet 분해에만 쓰고 결과를 캐시합니다. 온라인 호출도
-  전부 캐시합니다. 같은 입력이면 같은 결과입니다
+  전부 캐시합니다. 같은 입력이면 같은 결과입니다. **이 원칙은 2026-08-13 까지 지켜지지
+  않고 있었습니다** — BM25 정렬이 실행마다 흔들렸습니다(§8). 지금은 테스트가 붙잡습니다
 - **무음 폐기 금지** — 필터·윈도우·컷오프가 버린 논문 수는 반드시 세어서 `stats` 에
   남깁니다. 이 원칙이 실제로 버그를 다섯 번 잡았습니다(§8)
 
@@ -136,12 +137,12 @@ from survey_search.backends.faiss_duckdb import FaissDuckDBBackend
 from survey_search.search import search_topic
 from survey_search.types import SearchConfig
 
-backend = FaissDuckDBBackend()      # 재사용하세요. 첫 검색만 12초(인덱스 로드), 이후 0.1초
+backend = FaissDuckDBBackend()      # 재사용하세요. 생성+첫 검색 16초(인덱스 로드), 이후 2.6초
 
 result = search_topic(
     "Retrieval-Augmented Generation for Large Language Models",
     backend=backend,
-    config=SearchConfig(n_papers=1500, facets=True, freshness=True),   # 권장 기본값
+    config=SearchConfig(n_papers=1500, facets=True, freshness=True, lexical=False),  # 권장
 )
 
 result.ids()                  # ['2401.12345v2', ...] 랭킹 순
@@ -155,10 +156,14 @@ print(result.stats.report())  # 단계별 in/out, 폐기 건수와 사유, 최�
 ### 쓰는 법 — CLI
 
 ```bash
-.venv/bin/python -m survey_search.cli --topic "..." --facets --freshness --out results/
-.venv/bin/python -m survey_search.cli --topics-file topics.txt --all --out results/
+# 권장 설정
+.venv/bin/python -m survey_search.cli --topic "..." --facets --freshness --no-lexical --out results/
+.venv/bin/python -m survey_search.cli --topics-file topics.txt --facets --freshness --no-lexical --out results/
 .venv/bin/python -m survey_search.cli --topic "..." --ablate --out results/   # 설정별 비교표
 ```
+
+> `--all` 은 이름과 달리 "권장 설정 전부"가 아니라 **말 그대로 전부**라 다양성(MMR)까지
+> 켭니다. 정답 기준으로 손해라 지금은 경고가 뜹니다.
 
 ### 쓰는 법 — 기존 에이전트에 끼우기
 
@@ -185,7 +190,7 @@ rag = SurveySearchRAG(backend=FaissDuckDBBackend())
 | 옵션 | 기본 | 권장 | 하는 일 |
 |---|---|---|---|
 | `facets` | `False` | **켜기** | S1. LLM 이 토픽을 하위 주제로 분해. **기여가 가장 큽니다** |
-| `lexical` | `True` | 켜기 | S3. BM25. 꼬리 recall 을 늘립니다 |
+| `lexical` | `True` | **facet 켜면 끄기** | S3. BM25. facet 이 없을 때만 꼬리 recall 을 늘립니다(§7-⑤) |
 | `freshness` | `False` | **켜기** | S6. 연령 정규화 인용률 + recency |
 | `diversity` | `False` | **끄기** | S7. MMR. **정답 기준으로 항상 손해였습니다**(§7) |
 | `rerank` | `False` | **끄기** | S8b. cross-encoder. **세 가지 쿼리 방식 모두 기준선 미달**(§7) |
@@ -728,8 +733,53 @@ cross-encoder 점수에도 똑같이 적용되는데 raw 점수를 직접 비교
 | 스노우볼링이 0편 기여 | S2는 버전 없는 id, 로컬 DB는 버전 붙은 id | `get_papers` 에 base_id 폴백 |
 | 스노우볼링 논문이 컷에 못 듦 | 점수를 바닥에 깔아 경쟁 불가 | 임의 점수 대신 **RRF 융합** |
 | LLM 호출이 상한 없이 정지 | 170토픽 평가가 **CPU 0% 로 19분** 정지. 예외도 로그도 없음 | 벽시계 상한 `deadline_s` |
+| **조인의 `OR` 가 해시 조인을 막음** | 메타 조회가 5만 건에 **20초**(선형이면 0.2초) | 등호 조인 2회로 분리 → 0.23초 |
+| **같은 수만 편을 두 번 조회** | `dedup` 과 `meta` 가 각각 90초씩, 사실상 같은 일 | S5 결과 재사용 |
+| **BM25 정렬이 비결정적** | 같은 토픽 재검색이 **다른 논문 목록**을 냄 | `round(score,9)` + `paper_id` tie-break |
 
-특히 마지막 셋은 기능이 "돌아가는 것처럼 보이면서" 아무 일도 안 하던 경우입니다.
+특히 셋째~다섯째는 기능이 "돌아가는 것처럼 보이면서" 아무 일도 안 하던 경우입니다.
+
+### 성능 셋은 한 덩어리였습니다 (2026-08-13)
+
+facet 을 켠 검색 하나가 **227.8초**(BM25 켬) / 114.6초(끔) 걸리고 있었습니다.
+단계별로 재보니 dense 검색은 **0.145초로 전체의 0.1%**였고, `meta` 와 `S5 dedup` 이
+**82%**였습니다.
+
+```
+meta        90.1s (48,214건)      ← 같은 조회를 두 번, 그것도 OR 조인으로
+S5 dedup    90.0s                 ← 이쪽이 그 첫 번째
+S2 dense    30.8s
+S6 freshness 1.1s / S4 rrf 0.2s
+```
+
+**`OR` 조인은 두 수정이 겹쳐서 생긴 상처입니다.** 원래는 등호 조인이었고(그래서 위 표의
+"pyarrow 조인 → 0.32초"가 맞았습니다), 나중에 스노우볼링의 버전 없는 id 를 받으려고
+`OR p.base_id = w.want_base` 를 덧붙이면서 최적화가 **조용히 무효**가 됐습니다.
+성능 주석은 옛 값 그대로 남아 있어 아무도 그 자리를 의심하지 않았습니다.
+
+| | 전 | 후 |
+|---|---|---|
+| facets + freshness (BM25 켬) | 227.8초 | **13.9초** |
+| facets + freshness (BM25 끔, 권장) | 114.6초 | **2.6초** |
+
+품질은 그대로입니다 — 설정 4개 × 토픽 12개로 nDCG·R@1500 차이가 전부 0.
+
+### "결정적"이라고 적어 둔 것이 사실이 아니었습니다
+
+이 문서 §2 의 설계 원칙에 "같은 입력이면 같은 결과"라고 적혀 있었는데, **facet 을 켜면
+같은 토픽 재검색이 다른 목록을 냈습니다.**
+
+원인을 계층별로 좁혔습니다. 임베딩은 bitwise 동일했고 FAISS 도 결정적이었습니다.
+범인은 DuckDB BM25 였습니다 — 상위 300편의 **집합도 점수도 같은데**(최대차 **8.9e-16**)
+순서가 달랐습니다. `ORDER BY score DESC` 에 동점 규칙이 없어, 부동소수점 끝자리가
+흔들리면 순서가 갈립니다. `top_k` 경계에서는 순서를 넘어 **어느 논문이 들어오느냐**까지
+바뀝니다(2,000편 중 60등에서 다른 논문 유입).
+
+`SET threads TO 1` 로도 없어지지만 그건 느려집니다. `round(score, 9)` + `paper_id`
+tie-break 는 공짜입니다 — 점수 차가 1e-9 인 두 논문은 실질적으로 동점이니까요.
+
+`lexical_search` 가 돌려주는 raw 점수는 여전히 끝자리가 흔들리는데 **무해합니다.**
+이 파이프라인은 처음부터 융합에 순위만 쓰기 때문입니다(함정 4번). 원칙이 값을 한 사례입니다.
 
 **마지막 것은 라이브러리 계약을 잘못 읽은 사례라 따로 적어 둡니다.**
 `urllib.request.urlopen(req, timeout=90)` 의 `timeout` 은 **소켓 연산 1회**의 상한이지
@@ -769,15 +819,21 @@ cross-encoder 점수에도 똑같이 적용되는데 raw 점수를 직접 비교
 | **P4** 진단 하네스 | ✅ stats · 최신성 · 커버리지 · 베이스라인 대조 · 회귀 스냅샷 |
 | **P5.1 / 5.7** 스노우볼링 · 온라인 | ✅ arXiv API + S2 인용 그래프, 디스크 캐시 |
 | **P5.2** cross-encoder 재랭킹 | ✅ 구현 완료. **단, 정답 기준으로 기준선 미달** — §7 |
-| **P5.5** SurGE 정량 평가 | ✅ 하네스 완료 + 토픽 16개 측정. 170개 중 나머지는 미실행 |
+| **P5.5** SurGE 정량 평가 | ✅ **정답 토픽 170개 전체** 측정 완료 — §7 |
+| **성능·재현성** | ✅ 검색 1회 227초 → 2.6초, 결정성 확보 — §8 |
 
 ### 측정이 정한 권장 설정
 
 ```python
-SearchConfig(n_papers=1500, facets=True, freshness=True)   # 나머지는 끕니다
+SearchConfig(n_papers=1500, facets=True, freshness=True, lexical=False)   # 나머지는 끕니다
 ```
 
 `diversity` 와 `rerank` 는 구현돼 있지만 **정답 기준으로 기준선에 미달**했습니다(§7).
+
+**`lexical=False` 가 여기 들어간 것은 2026-08-13 측정 결과입니다.** BM25 는 facet 이
+꺼져 있을 때는 꼬리 recall 을 확실히 올리지만(R@1500 +3.1%p), **facet 을 켜면 하는 일이
+없어집니다** — 토픽별 짝지은 비교에서 네 지표 모두 `|평균차| < 2×SE`. 대신 검색 1회가
+13.9초에서 **2.6초**로 줄어듭니다. facet 을 안 쓸 거라면 BM25 는 켜 두세요.
 코드는 남겨 둡니다 — 커버리지가 진짜 목적 함수인 다른 설정에서는 결론이 다를 수 있고,
 "무엇이 효과가 없었는가"도 이 프로젝트의 결과물이기 때문입니다.
 

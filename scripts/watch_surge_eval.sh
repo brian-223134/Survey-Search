@@ -11,8 +11,8 @@
 #   setsid nohup scripts/watch_surge_eval.sh > data/logs/surge170_watchdog.log 2>&1 &
 set -u
 
-CKPT=data/surge_eval_170.ckpt.jsonl
-OUT=data/surge_eval_170.json
+CKPT=data/surge_eval_170_v2.ckpt.jsonl
+OUT=data/surge_eval_170_v2.json
 LOG=data/logs/surge170.log
 # **cmdline 전체에 앵커를 겁니다.** 그냥 "python scripts/eval_surge_full.py" 로 찾으면
 # 그 문자열을 인자로 가진 셸 래퍼(`bash -c '... pgrep -f "python scripts/eval_surge_full.py"'`)
