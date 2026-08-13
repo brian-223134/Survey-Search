@@ -7,7 +7,7 @@ AutoSurvey · SurveyForge · SurveyX 등 여러 서베이 에이전트가 공유
 topic: str  →  ranked · deduped · facet-grouped papers
 ```
 
-**최종 갱신**: 2026-08-12 · 테스트 134개 통과
+**최종 갱신**: 2026-08-12 · 테스트 154개 통과
 
 ---
 
@@ -55,7 +55,8 @@ topic
   ├─ S5  중복 제거 ────── arXiv 버전 병합 + 제목 정규화
   ├─ S6  freshness ───── 연령 정규화 인용률 백분위 + recency
   ├─ S8  스노우볼링 ───── S2 API 인용 그래프 (전방·후방)
-  ├─ S7  다양성 ──────── MMR + facet 쿼터
+  ├─ S8b cross-encoder ─ 재랭킹 (측정 결과 권장하지 않음)
+  ├─ S7  다양성 ──────── MMR + facet 쿼터 (측정 결과 권장하지 않음)
   └─ SearchResult (papers + facets + stats)
 ```
 
@@ -187,6 +188,7 @@ rag = SurveySearchRAG(backend=FaissDuckDBBackend())
 | `lexical` | `True` | 켜기 | S3. BM25. 꼬리 recall 을 늘립니다 |
 | `freshness` | `False` | **켜기** | S6. 연령 정규화 인용률 + recency |
 | `diversity` | `False` | **끄기** | S7. MMR. **정답 기준으로 항상 손해였습니다**(§7) |
+| `rerank` | `False` | **끄기** | S8b. cross-encoder. **세 가지 쿼리 방식 모두 기준선 미달**(§7) |
 | `snowball` | `False` | 선택 | S8. 인용 그래프 확장. 온라인/하이브리드 백엔드 필요 |
 | `n_papers` | `1500` | — | 최종 반환 편수 |
 | `date_min` / `date_max` | `None` | — | 날짜 컷오프 (**제출일 기준**) |
@@ -229,6 +231,7 @@ src/survey_search/
 │   ├── dedup.py        S5  버전 병합 + 제목 정규화
 │   ├── rank.py         S6  freshness (연령 정규화 인용률 + recency)
 │   ├── expand.py       S8  인용 스노우볼링
+│   ├── rerank.py       S8b cross-encoder 재랭킹
 │   └── diversity.py    S7  MMR + facet 쿼터
 │
 ├── adapters/           호스트 에이전트 호환 계층 (정본 아님)
@@ -246,6 +249,13 @@ src/survey_search/
 ├── eval/               정량 평가
 │   ├── surge.py        SurGE 정답 집합 구축 + ablation
 │   └── ceiling.py      검색 병목인가 랭킹 병목인가
+│
+scripts/                측정 실행 스크립트 (재현용)
+├── run_surge_eval.py       설정별 recall/nDCG
+├── probe_retrieval_depth.py  top_k 별 풀 recall
+├── eval_depth_final.py     top_k 2000 vs 8000 최종
+├── eval_rerank.py          재랭킹 TOPIC 모드
+└── eval_rerank_facet.py    재랭킹 FACET / FACET_MAX
 │
 └── cli.py              토픽 → JSON, --ablate 비교표
 ```
@@ -355,6 +365,20 @@ recency 는 두 방식을 다 구현해 두고 고르게 했습니다:
 여러 시드가 공통으로 가리킨 논문을 우선합니다(`min_seed_support`). 유입 논문의 점수
 (시드 지지도)는 RRF 점수와 스케일이 다르므로 **다시 RRF 로 융합**합니다 — 임의로 점수를
 깎아 붙이면 유입 논문이 최종 컷에 영원히 못 들어옵니다(§8).
+
+### S8b cross-encoder 재랭킹 — 구현했지만 권장하지 않습니다
+
+bi-encoder(gte)는 쿼리와 문서를 **따로** 인코딩합니다 — 그래야 90만 편을 미리 색인할 수
+있지만 둘이 서로를 보지 못합니다. cross-encoder 는 함께 넣어 한 번에 점수를 냅니다.
+정확하지만 후보 수만큼 forward 를 돌려야 해서 상위 수천 편에만 씁니다.
+
+천장 측정에서 랭킹 손실이 18.6%p 로 나왔으니 이 단계가 그걸 되찾을 것으로 봤는데,
+**세 가지 쿼리 방식이 모두 기준선에 미달했습니다**(§7). 원인은 쿼리 설계와 점수 비교
+방식이었지 재랭커 자체가 아닙니다. 코드는 남겨 뒀고 `rerank=False` 가 기본입니다.
+
+`RerankConfig.top_n` 은 **`n_papers` 보다 커야 합니다.** 작으면 최종 *집합* 이 안 바뀌고
+순서만 바뀌어서, 켠 실험과 끈 실험이 recall 로 구분되지 않습니다 — 그런 조합이면
+`stats` 에 경고가 뜹니다.
 
 ### S7 다양성 — 목적 함수가 정확도가 아니라 커버리지
 
@@ -634,10 +658,21 @@ cross-encoder 점수에도 똑같이 적용되는데 raw 점수를 직접 비교
 | **P3** 어댑터 · CLI | 🟡 시그니처·CLI 완료. **서베이 생성 스모크는 승인 대기** |
 | **P4** 진단 하네스 | ✅ stats · 최신성 · 커버리지 · 베이스라인 대조 · 회귀 스냅샷 |
 | **P5.1 / 5.7** 스노우볼링 · 온라인 | ✅ arXiv API + S2 인용 그래프, 디스크 캐시 |
+| **P5.2** cross-encoder 재랭킹 | ✅ 구현 완료. **단, 정답 기준으로 기준선 미달** — §7 |
 | **P5.5** SurGE 정량 평가 | ✅ 하네스 완료 + 토픽 16개 측정. 170개 중 나머지는 미실행 |
 
-내부 문서(`DESIGN.md` · `SETTING.md` · `TASKS.md`)는 이 저장소에 포함되지 않습니다
-(`.gitignore`). 설계 근거·환경 실측·단계별 결과표가 거기 있습니다.
+### 측정이 정한 권장 설정
+
+```python
+SearchConfig(n_papers=1500, facets=True, freshness=True)   # 나머지는 끕니다
+```
+
+`diversity` 와 `rerank` 는 구현돼 있지만 **정답 기준으로 기준선에 미달**했습니다(§7).
+코드는 남겨 둡니다 — 커버리지가 진짜 목적 함수인 다른 설정에서는 결론이 다를 수 있고,
+"무엇이 효과가 없었는가"도 이 프로젝트의 결과물이기 때문입니다.
+
+내부 문서(`DESIGN.md` · `SETTING.md` · `TASKS.md` · `HANDOFF.md`)는 이 저장소에
+포함되지 않습니다(`.gitignore`). 설계 근거·환경 실측·인수인계가 거기 있습니다.
 
 ## 11. 확정된 결정
 
