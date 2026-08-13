@@ -25,8 +25,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -223,6 +225,56 @@ ABLATIONS: dict[str, dict] = {
 }
 
 
+# --- 체크포인트 ---------------------------------------------------------------
+#
+# 170토픽 × 4설정은 두 시간 넘게 걸립니다. 중간에 죽으면 전부 날아가던 구조였고,
+# 실제로 facet LLM 호출 하나가 19분을 잡아먹는 일이 있었습니다. 그래서 (설정,토픽)
+# 쌍 하나가 끝날 때마다 JSONL 한 줄로 남기고, 재실행하면 그 지점부터 잇습니다.
+
+def _ckpt_fingerprint(configs: dict[str, dict], n_papers: int, respect_cutoff: bool) -> str:
+    """이 체크포인트를 만든 **실험 조건**의 지문.
+
+    설정이 다른 결과를 이어붙이면 표가 조용히 거짓말을 합니다. 지문이 다르면
+    이어받지 않고 멈춥니다 — 어느 쪽을 버릴지는 사람이 정해야 합니다.
+    """
+    raw = json.dumps(
+        {"configs": {k: dict(sorted(v.items())) for k, v in sorted(configs.items())},
+         "n_papers": n_papers, "respect_cutoff": respect_cutoff},
+        sort_keys=True, default=str)
+    return hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+
+def _score_to_line(name: str, s: TopicScore) -> str:
+    d = asdict(s)
+    d["recall"] = {str(k): v for k, v in s.recall.items()}   # JSON 키는 문자열만
+    return json.dumps({"config": name, **d}, ensure_ascii=False)
+
+
+def _read_checkpoint(path: Path, fingerprint: str) -> dict[str, dict[int, TopicScore]]:
+    lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
+    if not lines:
+        return {}
+    head = json.loads(lines[0])
+    got = head.get("_fingerprint")
+    if got != fingerprint:
+        raise ValueError(
+            f"체크포인트 {path} 는 다른 실험 조건({got})의 것입니다(지금은 {fingerprint}). "
+            "이어받으면 설정이 섞인 표가 나옵니다 — 파일을 지우거나 다른 경로를 쓰세요.")
+
+    done: dict[str, dict[int, TopicScore]] = {}
+    for ln in lines[1:]:
+        try:
+            d = json.loads(ln)
+        except json.JSONDecodeError:
+            # 죽는 순간 잘린 마지막 줄. 그 쌍만 다시 계산하면 됩니다.
+            log.warning("체크포인트 마지막 줄이 잘려 있어 버립니다: %s", ln[:80])
+            continue
+        name = d.pop("config")
+        d["recall"] = {int(k): v for k, v in d["recall"].items()}
+        done.setdefault(name, {})[d["survey_id"]] = TopicScore(**d)
+    return done
+
+
 def run(
     topics: list[GoldTopic],
     *,
@@ -230,6 +282,7 @@ def run(
     configs: dict[str, dict] | None = None,
     n_papers: int = 1500,
     respect_cutoff: bool = True,
+    checkpoint: Path | None = None,
 ) -> dict[str, list[TopicScore]]:
     from dataclasses import replace as dc_replace
 
@@ -239,16 +292,49 @@ def run(
     configs = configs or ABLATIONS
     out: dict[str, list[TopicScore]] = {name: [] for name in configs}
 
-    for i, g in enumerate(topics, 1):
-        for name, overrides in configs.items():
-            cfg = dc_replace(SearchConfig(n_papers=n_papers), **overrides)
-            if respect_cutoff and g.date:
-                # 서베이가 못 봤을 논문을 우리가 찾아 오면 오답으로 세집니다.
-                cfg = dc_replace(cfg, date_max=g.date)
-            r = search_topic(g.topic, backend=backend, config=cfg)
-            out[name].append(score_topic(r.ids(), g))
-        if i % 5 == 0 or i == len(topics):
-            log.info("%d/%d 토픽 완료", i, len(topics))
+    done: dict[str, dict[int, TopicScore]] = {}
+    fh = None
+    if checkpoint is not None:
+        fp = _ckpt_fingerprint(configs, n_papers, respect_cutoff)
+        if checkpoint.exists():
+            done = _read_checkpoint(checkpoint, fp)
+            n_reuse = sum(len(v) for v in done.values())
+            log.info("체크포인트 %s 에서 (설정,토픽) 쌍 %d개 이어받습니다", checkpoint, n_reuse)
+        else:
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint.write_text(json.dumps({"_fingerprint": fp}) + "\n")
+        fh = checkpoint.open("a")
+
+    try:
+        n_reused = n_fresh = 0
+        for i, g in enumerate(topics, 1):
+            for name, overrides in configs.items():
+                prev = done.get(name, {}).get(g.survey_id)
+                if prev is not None:
+                    out[name].append(prev)
+                    n_reused += 1
+                    continue
+
+                cfg = dc_replace(SearchConfig(n_papers=n_papers), **overrides)
+                if respect_cutoff and g.date:
+                    # 서베이가 못 봤을 논문을 우리가 찾아 오면 오답으로 세집니다.
+                    cfg = dc_replace(cfg, date_max=g.date)
+                r = search_topic(g.topic, backend=backend, config=cfg)
+                sc = score_topic(r.ids(), g)
+                out[name].append(sc)
+                n_fresh += 1
+
+                if fh is not None:
+                    # 줄 단위로 즉시 내려씁니다 — kill -9 로 죽어도 여기까지는 남습니다.
+                    fh.write(_score_to_line(name, sc) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            if i % 5 == 0 or i == len(topics):
+                log.info("%d/%d 토픽 완료 (새로 계산 %d, 이어받음 %d)",
+                         i, len(topics), n_fresh, n_reused)
+    finally:
+        if fh is not None:
+            fh.close()
     return out
 
 
@@ -275,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-cutoff", action="store_true",
                     help="날짜 컷오프 없이 평가 (불공정 — 비교용으로만)")
     ap.add_argument("--out", type=Path, help="결과 JSON 경로")
+    ap.add_argument("--checkpoint", type=Path,
+                    help="(설정,토픽) 쌍마다 이어쓸 JSONL. 있으면 그 지점부터 이어서 돕니다")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -296,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
     backend = FaissDuckDBBackend()
 
     results = run(topics, backend=backend, n_papers=args.n_papers,
-                  respect_cutoff=not args.no_cutoff)
+                  respect_cutoff=not args.no_cutoff, checkpoint=args.checkpoint)
     print("\n" + render(results))
 
     if args.out:

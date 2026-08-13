@@ -1,6 +1,8 @@
 """S1 facet 분해 — 네트워크 없이 도는 부분만."""
 
 import json
+import time
+import urllib.error
 
 import pytest
 
@@ -14,8 +16,8 @@ from survey_search.core.facets import (
 )
 
 
-def cfg() -> FacetConfig:
-    return FacetConfig().resolved()
+def cfg(**kw) -> FacetConfig:
+    return FacetConfig(**kw).resolved()
 
 
 def test_parse_plain_json():
@@ -148,3 +150,70 @@ def test_decompose_falls_back_on_any_llm_error(tmp_path, monkeypatch):
     assert stats.source == "fallback"
     assert facets
     assert any("AttributeError" in w for w in stats.warnings)
+
+
+# --- 벽시계 상한 (keep-alive 로 소켓 타임아웃이 안 걸리는 실제 사고에 대한 대응) ------
+
+class _KeepAliveStream:
+    """응답을 안 끝내면서 주기적으로 바이트만 흘리는 서버 흉내.
+
+    실측한 실제 동작입니다 — OpenRouter 가 10초마다 912바이트를 보내는 바람에
+    `urlopen(timeout=90)` 이 매 읽기마다 초기화돼 16분 넘게 안 끝났습니다.
+    """
+
+    def read(self):
+        while True:
+            time.sleep(0.01)      # 읽기 자체는 계속 성공 = 소켓 타임아웃 발동 안 함
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_deadline_fires_even_when_socket_timeout_cannot(monkeypatch):
+    """소켓 타임아웃이 구조적으로 못 잡는 정지를 벽시계 상한이 잡아야 합니다."""
+    import survey_search.core.facets as F
+
+    monkeypatch.setattr(F.urllib.request, "urlopen",
+                        lambda *a, **k: _KeepAliveStream())
+    t0 = time.perf_counter()
+    with pytest.raises(TimeoutError, match="안 끝났습니다"):
+        F._read_with_deadline(object(), cfg(deadline_s=0.3, timeout_s=90.0))
+    assert time.perf_counter() - t0 < 5.0   # 90초 상한을 안 기다려야 합니다
+
+
+def test_deadline_propagates_the_real_error_not_a_timeout(monkeypatch):
+    """스레드 안에서 난 예외는 원형 그대로 올라와야 재시도 분기가 맞습니다."""
+    import survey_search.core.facets as F
+
+    def boom(*a, **k):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(F.urllib.request, "urlopen", boom)
+    with pytest.raises(urllib.error.URLError):
+        F._read_with_deadline(object(), cfg())
+
+
+def test_call_openrouter_retries_then_gives_up_on_deadline(monkeypatch):
+    """상한 초과는 재시도 대상이고, 다 실패하면 RuntimeError -> fallback 으로 갑니다."""
+    import survey_search.core.facets as F
+
+    calls = []
+
+    def hang(req, c):
+        calls.append(1)
+        raise TimeoutError("응답이 0초 안에 안 끝났습니다")
+
+    monkeypatch.setattr(F, "_read_with_deadline", hang)
+    monkeypatch.setattr(F.time, "sleep", lambda s: None)   # 백오프 대기 건너뜁니다
+    with pytest.raises(RuntimeError, match="3회 모두 실패"):
+        F._call_openrouter("T", cfg(api_key="k"))
+    assert len(calls) == 3
+
+
+def test_deadline_default_is_bounded():
+    """기본값이 None/무한이면 이 사고가 그대로 재발합니다."""
+    d = FacetConfig().resolved().deadline_s
+    assert 0 < d <= 600

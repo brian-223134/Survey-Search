@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -68,6 +69,10 @@ class FacetConfig:
     base_url: str = ""
     cache_dir: Path | None = None
     timeout_s: float = 90.0
+    #: 호출 1회의 **벽시계** 상한. `timeout_s` 와 별개로 반드시 필요합니다 — 이유는
+    #: `_read_with_deadline` 주석 참고. 실측 정상 지연이 39~41초(n=3, deepseek-v4-flash,
+    #: n_facets=12)라 3배 여유를 뒀습니다. 더 늘리면 죽은 라우팅을 그만큼 오래 붙듭니다.
+    deadline_s: float = 120.0
     max_retries: int = 2
     max_queries_per_facet: int = 3
 
@@ -81,6 +86,7 @@ class FacetConfig:
                       ).rstrip("/"),
             cache_dir=self.cache_dir or (DATA_DIR / "facet_cache"),
             timeout_s=self.timeout_s,
+            deadline_s=self.deadline_s,
             max_retries=self.max_retries,
             max_queries_per_facet=self.max_queries_per_facet,
         )
@@ -160,6 +166,41 @@ def _parse_facets(text: str | None, cfg: FacetConfig) -> list[Facet]:
     return out
 
 
+def _read_with_deadline(req: urllib.request.Request, cfg: FacetConfig) -> dict:
+    """요청 1회를 **벽시계 상한** 안에서 끝냅니다.
+
+    `urlopen(timeout=)` 은 소켓 연산 1회의 상한이지 호출 전체의 상한이 아닙니다.
+    OpenRouter(Cloudflare 뒤)는 생성이 긴 요청에 **10초마다 912바이트의 keep-alive
+    를 흘려보냅니다.** 그때마다 읽기가 성공하니 90초 타이머가 매번 초기화되고,
+    상한은 영영 발동하지 않습니다.
+
+    실측: 170토픽 평가가 이 상태로 CPU 0%, 정확히 10초 간격 912바이트 수신만 하며
+    16분 넘게 멈춰 있었습니다. 소켓은 살아 있어서 예외도 안 났습니다.
+
+    그래서 데몬 스레드에 실어 join 으로 상한을 겁니다. 상한을 넘긴 스레드는 버리는데,
+    소켓 하나가 새는 대신 배치가 무한정 서지 않습니다 — 그 편이 낫습니다.
+    """
+    box: dict[str, object] = {}
+
+    def work() -> None:
+        try:
+            with urllib.request.urlopen(req, timeout=cfg.timeout_s) as r:
+                box["ok"] = json.loads(r.read())
+        except BaseException as e:  # noqa: BLE001  버린 스레드의 예외를 옮겨 싣습니다
+            box["err"] = e
+
+    th = threading.Thread(target=work, daemon=True, name="facet-llm")
+    th.start()
+    th.join(cfg.deadline_s)
+    if th.is_alive():
+        raise TimeoutError(
+            f"OpenRouter 응답이 {cfg.deadline_s:.0f}초 안에 안 끝났습니다 "
+            "(keep-alive 때문에 소켓 타임아웃이 안 걸리는 경우)")
+    if "err" in box:
+        raise box["err"]  # type: ignore[misc]
+    return box["ok"]  # type: ignore[return-value]
+
+
 def _call_openrouter(topic: str, cfg: FacetConfig) -> str:
     body = json.dumps({
         "model": cfg.model,
@@ -180,8 +221,7 @@ def _call_openrouter(topic: str, cfg: FacetConfig) -> str:
     last: Exception | None = None
     for attempt in range(cfg.max_retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=cfg.timeout_s) as r:
-                payload = json.loads(r.read())
+            payload = _read_with_deadline(req, cfg)
             content = payload["choices"][0]["message"]["content"]
             if not content:
                 # 빈 응답은 재시도할 가치가 있습니다 — 프로바이더 일시 장애일 수 있습니다.
@@ -268,9 +308,15 @@ def decompose(
     # fallback 은 캐시하지 않습니다 — 키를 넣고 다시 돌리면 제대로 나와야 합니다.
     if use_cache and stats.source == "llm":
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(
+        blob = json.dumps(
             {"topic": topic, "model": cfg.model, "prompt_version": PROMPT_VERSION,
              "facets": [{"name": f.name, "queries": list(f.queries)} for f in facets]},
-            ensure_ascii=False, indent=2))
+            ensure_ascii=False, indent=2)
+        # 원자적으로 갈아끼웁니다. 캐시를 채우는 프로세스를 여러 개 띄우면 같은 토픽이
+        # 겹칠 수 있고, 그때 write_text 는 반쯤 쓰인 JSON 을 남길 수 있습니다 —
+        # 그 파일은 다음 실행에서 조용히 JSONDecodeError 로 터집니다.
+        tmp = cache_path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(blob)
+        os.replace(tmp, cache_path)
 
     return facets, stats

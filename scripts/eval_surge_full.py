@@ -10,6 +10,7 @@ BM25(R@50 −3.0%p / R@1500 +3.4%p)와 freshness(nDCG +0.029)처럼 **격차가 
 """
 import json
 import logging
+from pathlib import Path
 
 from survey_search.core.facets import load_dotenv
 from survey_search.eval.surge import aggregate, load_gold, render, run
@@ -31,7 +32,10 @@ log = logging.getLogger(__name__)
 log.info("토픽 %d개 × 설정 %d개 -> 검색 %d회", len(topics), len(CONFIGS),
          len(topics) * len(CONFIGS))
 
-res = run(topics, backend=FaissDuckDBBackend(), configs=CONFIGS, n_papers=1500)
+# 두 시간짜리 실행이라 (설정,토픽) 쌍마다 이어씁니다. 죽어도 같은 명령으로 다시 돌리면
+# 그 지점부터 잇습니다. 조건을 바꾸려면 이 파일을 지우세요 — 섞이면 거부합니다.
+res = run(topics, backend=FaissDuckDBBackend(), configs=CONFIGS, n_papers=1500,
+          checkpoint=Path("data/surge_eval_170.ckpt.jsonl"))
 print("\n" + render(res))
 json.dump({k: aggregate(v) for k, v in res.items()},
           open("data/surge_eval_170.json", "w"), indent=2)
