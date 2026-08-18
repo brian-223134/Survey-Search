@@ -23,6 +23,12 @@
 | [diversity-mmr.md](diversity-mmr.md) | 다양성(MMR)은 정답 기준으로 **항상 손해**였습니다 |
 | [reranking.md](reranking.md) | cross-encoder 재랭킹 3변형 **전부 기준선 미달.** 원인은 재랭커가 아니었습니다 |
 
+## 발표 — 말로 설명하는 순서
+
+| 문서 | 무엇을 답하나 |
+|---|---|
+| [presentation/](presentation/README.md) | **인턴 세미나용.** 기능·차별성·SimScholarSearch 계보를 척추로, 슬라이드 구성안·예상 질문·복붙용 표까지 |
+
 ## 엔지니어링 — 재고 고친 것
 
 | 문서 | 무엇을 답하나 |
@@ -43,6 +49,9 @@
 
 **호스트에 끼울 거라면** — 함정 13·14(어댑터 배선)와 `../SURVEY-SEARCH.md` §6.
 "시그니처가 맞는 것"과 "인자가 도착하는 것"은 다릅니다.
+
+**발표하거나 설명할 거라면** — [presentation/](presentation/README.md).
+같은 내용을 "무엇을 재봤는가"가 아니라 **"어떤 순서로 말해야 하는가"** 로 다시 짜 두었습니다.
 
 **결과를 못 믿겠다면** — [determinism.md](determinism.md).
 2026-08-13 이전에 뽑은 숫자는 재현되지 않습니다. 그 이유가 여기 있습니다.
